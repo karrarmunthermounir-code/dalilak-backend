@@ -1,0 +1,664 @@
+const User     = require('../models/User');
+const Place    = require('../models/Place');
+const { generateToken } = require('../middleware/auth');
+const mongoose = require('mongoose');
+const nodemailer = require('nodemailer');
+const bcrypt   = require('bcryptjs');
+
+// ─── مخزن في الذاكرة كـ fallback عند عدم توفر MongoDB ───
+const memoryUsers = new Map();
+
+// ─── مخزن مؤقت لرموز OTP ───
+const otpStore = new Map(); // key: identifier, value: { code, expiresAt, attempts }
+
+const isMongoConnected = () => mongoose.connection.readyState === 1;
+
+// ─── إعداد Nodemailer ───
+const createTransporter = () => {
+  if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+    return nodemailer.createTransport({
+      service: process.env.EMAIL_SERVICE || 'gmail',
+      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+    });
+  }
+  return null;
+};
+
+// ─── إرسال OTP بالإيميل ───
+const sendOtpEmail = async (email, otp) => {
+  const transporter = createTransporter();
+  if (!transporter) {
+    // وضع التطوير — اطبع في الـ console
+    console.log(`\n🔑 [OTP DEMO] البريد: ${email} — الكود: ${otp} — (10 دقائق)\n`);
+    return;
+  }
+  await transporter.sendMail({
+    from: `"دليلك" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: '🔑 كود إعادة تعيين كلمة المرور — دليلك',
+    html: `
+      <div style="direction:rtl;font-family:Arial,sans-serif;max-width:480px;margin:auto;background:#0d1f17;color:#e8f5ee;border-radius:16px;padding:32px;">
+        <h2 style="color:#5dde8a;text-align:center;">🌴 دليلك</h2>
+        <p style="font-size:16px;">مرحباً،</p>
+        <p>استخدم الكود أدناه لإعادة تعيين كلمة مرورك:</p>
+        <div style="background:#1a3a28;border-radius:12px;padding:24px;text-align:center;margin:24px 0;">
+          <span style="font-size:36px;font-weight:900;letter-spacing:10px;color:#c9973a;">${otp}</span>
+        </div>
+        <p style="color:#8aaa96;font-size:14px;">⏰ الكود صالح لمدة <strong>10 دقائق</strong> فقط.</p>
+        <p style="color:#8aaa96;font-size:14px;">إذا لم تطلب هذا، تجاهل هذه الرسالة.</p>
+        <hr style="border-color:#1a3a28;margin:24px 0;">
+        <p style="text-align:center;color:#5a7a68;font-size:12px;">دليلك — تطبيق الأماكن العراقي</p>
+      </div>
+    `,
+  });
+};
+
+// ─── توليد OTP ───
+const generateOTP = () => String(Math.floor(100000 + Math.random() * 900000));
+
+// ─── دالة مساعدة لإنشاء user من الذاكرة ───
+function createMemoryUser({ name, identifier, password, role }) {
+  const id = 'mem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5);
+  const user = {
+    _id: id, id, name, identifier, password,
+    role: role || 'user',
+    avatar: name.charAt(0).toUpperCase(),
+    businessName: '', businessType: '', businessId: null,
+    subscription: {},
+    favorites: [],
+    stats: [],
+    createdAt: new Date().toISOString(),
+  };
+  memoryUsers.set(identifier, user);
+  return user;
+}
+
+function sanitizeUser(user) {
+  const { password, ...safe } = user;
+  return safe;
+}
+
+// ─── تسجيل مستخدم جديد ───
+const register = async (req, res) => {
+  try {
+    const { name, identifier, password, role } = req.body;
+
+    if (!name || !identifier || !password)
+      return res.status(400).json({ success: false, message: 'الاسم والمعرّف وكلمة المرور مطلوبة' });
+
+    if (password.length < 6)
+      return res.status(400).json({ success: false, message: 'كلمة المرور 6 أحرف على الأقل' });
+
+    let userId, userObj;
+
+    if (isMongoConnected()) {
+      const exists = await User.findOne({ identifier: identifier.trim() });
+      if (exists) return res.status(400).json({ success: false, message: 'هذا الحساب مسجّل مسبقاً' });
+
+      const user = await User.create({
+        name: name.trim(), identifier: identifier.trim(), password,
+        role: role || 'user', avatar: name.trim().charAt(0).toUpperCase(),
+      });
+      userId  = user._id;
+      userObj = {
+        id: user._id, name: user.name, identifier: user.identifier,
+        role: user.role, avatar: user.avatar,
+        businessName: user.businessName, businessId: user.businessId,
+        subscription: {}, favorites: [],
+      };
+    } else {
+      // Fallback: الذاكرة
+      if (memoryUsers.has(identifier.trim()))
+        return res.status(400).json({ success: false, message: 'هذا الحساب مسجّل مسبقاً' });
+
+      const user = createMemoryUser({ name: name.trim(), identifier: identifier.trim(), password, role });
+      userId  = user.id;
+      userObj = sanitizeUser(user);
+    }
+
+    const token = generateToken(userId);
+    res.status(201).json({ success: true, token, user: userObj });
+  } catch (err) {
+    console.error('register error:', err);
+    res.status(500).json({ success: false, message: 'خطأ في الخادم' });
+  }
+};
+
+// ─── تسجيل الدخول ───
+const login = async (req, res) => {
+  try {
+    const { identifier, password } = req.body;
+
+    if (!identifier || !password)
+      return res.status(400).json({ success: false, message: 'المعرّف وكلمة المرور مطلوبان' });
+
+    let userObj, userId;
+
+    if (isMongoConnected()) {
+      const user = await User.findOne({ identifier: identifier.trim() });
+      if (!user) return res.status(401).json({ success: false, message: 'الحساب غير موجود' });
+
+      // ─── مقارنة آمنة بـ bcrypt (تدعم القديمة والجديدة) ───
+      const isMatch = await user.comparePassword(password);
+      if (!isMatch) return res.status(401).json({ success: false, message: 'كلمة المرور غير صحيحة' });
+
+      // ─── ترقية كلمات المرور القديمة (plain text → bcrypt) ───
+      if (!user.password.startsWith('$2a$') && !user.password.startsWith('$2b$')) {
+        const salt = await bcrypt.genSalt(12);
+        user.password = await bcrypt.hash(password, salt);
+        await user.save();
+        console.log(`🔐 Password upgraded to bcrypt for: ${user.identifier}`);
+      }
+
+      const sub = user.subscription;
+      const isActive = sub && sub.expiresAt && new Date(sub.expiresAt) > new Date();
+      const tier = isActive ? (['premium', 'yearly'].includes(sub.planId) ? 'premium' : 'pro') : 'free';
+
+      userId  = user._id;
+      userObj = {
+        id: user._id, name: user.name, identifier: user.identifier,
+        role: user.role, avatar: user.avatar,
+        businessName: user.businessName, businessId: user.businessId,
+        favorites: user.favorites,
+        settings: user.settings || {},
+        subscription: isActive ? { ...sub.toObject(), active: true, tier, daysLeft: Math.ceil((new Date(sub.expiresAt) - new Date()) / 864e5) }
+                                : { active: false, tier: 'free' },
+      };
+    } else {
+      // Fallback: الذاكرة
+      const user = memoryUsers.get(identifier.trim());
+      if (!user) return res.status(401).json({ success: false, message: 'الحساب غير موجود' });
+      if (user.password !== password) return res.status(401).json({ success: false, message: 'كلمة المرور غير صحيحة' });
+
+      userId  = user.id;
+      const sub = user.subscription || {};
+      const isActive = sub.expiresAt && new Date(sub.expiresAt) > new Date();
+      userObj = {
+        ...sanitizeUser(user),
+        subscription: isActive ? { ...sub, active: true } : { active: false, tier: 'free' },
+      };
+    }
+
+    // ─── جلب أماكن المستخدم مباشرةً مع الـ Login ───
+    let myPlaces = [];
+    if (isMongoConnected()) {
+      // 🔑 بحث بـ ObjectId فقط — المصدر الوحيد للملكية
+      myPlaces = await Place.find({
+        ownerId: userId,
+        isActive: true,
+      }).lean();
+    }
+
+    const token = generateToken(userId);
+    res.json({ success: true, token, user: userObj, places: myPlaces });
+  } catch (err) {
+    console.error('login error:', err);
+    res.status(500).json({ success: false, message: 'خطأ في الخادم' });
+  }
+};
+
+// ─── جلب بيانات المستخدم الحالي ───
+const getMe = async (req, res) => {
+  try {
+    const user = req.user; // من middleware
+    const sub = (user.subscription && typeof user.subscription.toObject === 'function')
+      ? user.subscription.toObject() : (user.subscription || {});
+    const isActive = sub.expiresAt && new Date(sub.expiresAt) > new Date();
+    const tier = isActive ? (['premium', 'yearly'].includes(sub.planId) ? 'premium' : 'pro') : 'free';
+
+    res.json({
+      success: true,
+      user: {
+        id: user._id || user.id,
+        name: user.name,
+        identifier: user.identifier,
+        role: user.role,
+        avatar: user.avatar,
+        businessName: user.businessName || '',
+        businessId: user.businessId || null,
+        favorites: user.favorites || [],
+        settings: user.settings || {},
+        subscription: isActive
+          ? { ...sub, active: true, tier, daysLeft: Math.ceil((new Date(sub.expiresAt) - new Date()) / 864e5) }
+          : { active: false, tier: 'free' },
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'خطأ في الخادم' });
+  }
+};
+
+// ─── تحديث بيانات المستخدم ───
+const updateProfile = async (req, res) => {
+  try {
+    const { name, businessName, businessType } = req.body;
+
+    if (isMongoConnected()) {
+      const updates = {};
+      if (name) updates.name = name.trim();
+      if (businessName !== undefined) updates.businessName = businessName;
+      if (businessType !== undefined) updates.businessType = businessType;
+      const user = await User.findByIdAndUpdate(req.user._id, updates, { new: true }).select('-password');
+      res.json({ success: true, user });
+    } else {
+      // fallback: تحديث في الذاكرة
+      for (const [key, u] of memoryUsers.entries()) {
+        if (u.id === String(req.user._id || req.user.id)) {
+          if (name) u.name = name.trim();
+          if (businessName !== undefined) u.businessName = businessName;
+          if (businessType !== undefined) u.businessType = businessType;
+          memoryUsers.set(key, u);
+          res.json({ success: true, user: sanitizeUser(u) });
+          return;
+        }
+      }
+      res.json({ success: true, user: req.user });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'خطأ في التحديث' });
+  }
+};
+
+// ─── تبديل المفضلة ───
+const toggleFavorite = async (req, res) => {
+  try {
+    const { placeId } = req.body;
+    let favorites, added;
+
+    if (isMongoConnected()) {
+      const user = await User.findById(req.user._id);
+      const idx = user.favorites.indexOf(placeId);
+      if (idx === -1) { user.favorites.push(placeId); added = true; }
+      else { user.favorites.splice(idx, 1); added = false; }
+      await user.save();
+      favorites = user.favorites;
+    } else {
+      // fallback: الذاكرة
+      for (const [key, u] of memoryUsers.entries()) {
+        if (u.id === String(req.user._id || req.user.id)) {
+          const idx = u.favorites.indexOf(placeId);
+          if (idx === -1) { u.favorites.push(placeId); added = true; }
+          else { u.favorites.splice(idx, 1); added = false; }
+          memoryUsers.set(key, u);
+          favorites = u.favorites;
+          break;
+        }
+      }
+      if (!favorites) favorites = [];
+    }
+
+    res.json({ success: true, favorites, added });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'خطأ في المفضلة' });
+  }
+};
+
+// ─── تفعيل الاشتراك ───
+const activateSubscription = async (req, res) => {
+  try {
+    const { planId, planName } = req.body;
+    const DURATIONS = { free_trial: 30, monthly_pro: 30, pro: 30, premium: 365, yearly: 365 };
+    const days = DURATIONS[planId] || 30;
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + days * 864e5);
+    const tier = 'premium'; // كل الخطط تمنح كل المميزات
+
+    const subObj = { planId, planName, status: 'active', activatedAt: now, expiresAt };
+
+    if (isMongoConnected()) {
+      await User.findByIdAndUpdate(req.user._id, { subscription: subObj });
+    } else {
+      // fallback: الذاكرة
+      for (const [key, u] of memoryUsers.entries()) {
+        if (u.id === String(req.user._id || req.user.id)) {
+          u.subscription = subObj;
+          memoryUsers.set(key, u);
+          break;
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      subscription: { ...subObj, active: true, tier, daysLeft: days },
+    });
+  } catch (err) {
+    console.error('activateSubscription error:', err);
+    res.status(500).json({ success: false, message: 'خطأ في تفعيل الاشتراك' });
+  }
+};
+
+// ─── جلب الإحصائيات الحقيقية من أماكن المستخدم ───
+const getStats = async (req, res) => {
+  try {
+    const userId  = String(req.user._id || req.user.id);
+    const placeId = req.params.placeId;
+
+    // إحصائيات فارغة (صفر) — لا أرقام عشوائية
+    const emptyStats = (pid) => ({
+      placeId: pid || 'all',
+      views: 0, clicks: 0, favorites: 0, calls: 0, bookings: 0, reviewsCount: 0,
+      viewsHistory: Array.from({ length: 7 }, (_, i) => ({
+        date:  new Date(Date.now() - (6 - i) * 864e5).toLocaleDateString('ar-IQ'),
+        views: 0,
+      })),
+    });
+
+    if (!isMongoConnected()) {
+      // بدون قاعدة بيانات لا توجد بيانات حقيقية — نُرجع أصفاراً بدل أرقام مزيّفة
+      return res.json({ success: true, stats: emptyStats(placeId) });
+    }
+
+    // اجمع كل أماكن المستخدم النشطة (يدعم أكثر من مكان)
+    const ownerFilter = { ownerId: req.user._id, isActive: true };
+    if (placeId && mongoose.Types.ObjectId.isValid(placeId)) {
+      ownerFilter._id = new mongoose.Types.ObjectId(placeId);
+    }
+    const places = await Place.find(ownerFilter)
+      .select('_id stats reviews')
+      .lean();
+
+    if (!places.length) {
+      return res.json({ success: true, stats: emptyStats(placeId) });
+    }
+
+    const placeIds = places.map(p => String(p._id));
+    // عدد المستخدمين الذين أضافوا أحد هذه الأماكن للمفضلة
+    const favorites = await User.countDocuments({ favorites: { $in: placeIds } });
+
+    const totals = places.reduce((acc, p) => {
+      const s = p.stats || {};
+      acc.views    += s.views || 0;
+      acc.bookings += s.bookings || 0;
+      acc.reviewsCount += (s.reviewsCount != null ? s.reviewsCount : (p.reviews?.length || 0));
+      return acc;
+    }, { views: 0, bookings: 0, reviewsCount: 0 });
+
+    const stats = {
+      placeId: placeId || 'all',
+      views:        totals.views,
+      bookings:     totals.bookings,
+      reviewsCount: totals.reviewsCount,
+      calls:        totals.bookings, // نقرات الاتصال الحقيقية المتوفرة = الحجوزات
+      clicks:       totals.views,
+      favorites,
+      // لا يوجد تتبّع يومي للمشاهدات بعد — نُرجع آخر 7 أيام بأصفار بدل أرقام عشوائية
+      viewsHistory: Array.from({ length: 7 }, (_, i) => ({
+        date:  new Date(Date.now() - (6 - i) * 864e5).toLocaleDateString('ar-IQ'),
+        views: i === 6 ? totals.views : 0,
+      })),
+    };
+
+    res.json({ success: true, stats });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'خطأ في الإحصائيات' });
+  }
+};
+
+// ─── طلب OTP لإعادة تعيين كلمة المرور ───
+const requestPasswordReset = async (req, res) => {
+  try {
+    const { identifier } = req.body;
+    if (!identifier) return res.status(400).json({ success: false, message: 'أدخل البريد الإلكتروني أو رقم الموبايل' });
+
+    const id = identifier.trim();
+
+    // تحقق من وجود المستخدم
+    let exists = false;
+    if (isMongoConnected()) {
+      const user = await User.findOne({ identifier: id });
+      exists = !!user;
+    } else {
+      exists = memoryUsers.has(id);
+    }
+
+    if (!exists) {
+      return res.status(404).json({ success: false, message: 'الحساب غير موجود' });
+    }
+
+    // تحقق من طلب سابق (منع الإرسال المتكرر قبل دقيقة)
+    const existing = otpStore.get(id);
+    if (existing && existing.expiresAt - Date.now() > 9 * 60 * 1000) {
+      return res.status(429).json({ success: false, message: 'تم إرسال كود مسبقاً، انتظر دقيقة قبل إعادة الإرسال' });
+    }
+
+    const otp = generateOTP();
+    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 دقائق
+    otpStore.set(id, { code: otp, expiresAt, attempts: 0 });
+
+    // تحديد نوع المعرّف
+    const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id);
+    const isPhone = /^07[3-9]\d{8}$/.test(id);
+
+    if (isEmail) {
+      await sendOtpEmail(id, otp);
+      console.log(`📧 OTP sent to email: ${id}`);
+    } else if (isPhone) {
+      // SMS — في الوقت الحالي يُعرض في الـ console (تحتاج SMS provider مثل Twilio)
+      console.log(`\n📱 [OTP SMS] رقم: ${id} — الكود: ${otp} — (10 دقائق)\n`);
+    }
+
+    const isDev = !process.env.EMAIL_USER; // وضع التطوير
+    res.json({
+      success: true,
+      message: isEmail ? 'تم إرسال الكود إلى بريدك الإلكتروني' : 'تم إرسال الكود إلى رقمك عبر SMS',
+      method: isEmail ? 'email' : 'sms',
+      // في وضع التطوير فقط — لا ترسله في الإنتاج!
+      devOtp: isDev ? otp : undefined,
+    });
+  } catch (err) {
+    console.error('requestPasswordReset error:', err);
+    res.status(500).json({ success: false, message: 'خطأ في الخادم' });
+  }
+};
+
+// ─── التحقق من OTP وإعادة تعيين كلمة المرور ───
+const resetPassword = async (req, res) => {
+  try {
+    const { identifier, otp, newPassword } = req.body;
+    if (!identifier || !otp || !newPassword)
+      return res.status(400).json({ success: false, message: 'جميع الحقول مطلوبة' });
+    if (newPassword.length < 6)
+      return res.status(400).json({ success: false, message: 'كلمة المرور 6 أحرف على الأقل' });
+
+    const id = identifier.trim();
+    const stored = otpStore.get(id);
+
+    if (!stored) {
+      return res.status(400).json({ success: false, message: 'لم يتم طلب كود لهذا الحساب، أو انتهت صلاحيته' });
+    }
+
+    if (Date.now() > stored.expiresAt) {
+      otpStore.delete(id);
+      return res.status(400).json({ success: false, message: 'انتهت صلاحية الكود، اطلب كوداً جديداً' });
+    }
+
+    // تحديد عدد المحاولات (حد أقصى 5)
+    stored.attempts += 1;
+    if (stored.attempts > 5) {
+      otpStore.delete(id);
+      return res.status(429).json({ success: false, message: 'تجاوزت عدد المحاولات، اطلب كوداً جديداً' });
+    }
+
+    if (stored.code !== otp.trim()) {
+      return res.status(400).json({ success: false, message: `الكود غير صحيح، تبقى ${5 - stored.attempts} محاولة` });
+    }
+
+    // الكود صحيح — حذفه وتحديث كلمة المرور
+    otpStore.delete(id);
+
+    if (isMongoConnected()) {
+      // ─── تشفير كلمة المرور الجديدة قبل الحفظ ───
+      const salt = await bcrypt.genSalt(12);
+      const hashedPassword = await bcrypt.hash(newPassword, salt);
+      await User.findOneAndUpdate({ identifier: id }, { password: hashedPassword });
+    } else {
+      const user = memoryUsers.get(id);
+      if (user) { user.password = newPassword; memoryUsers.set(id, user); }
+    }
+
+    res.json({ success: true, message: 'تم تغيير كلمة المرور بنجاح، يمكنك تسجيل الدخول الآن' });
+  } catch (err) {
+    console.error('resetPassword error:', err);
+    res.status(500).json({ success: false, message: 'خطأ في الخادم' });
+  }
+};
+
+// ─── حفظ اشتراك Push Notification ───
+const savePushSubscription = async (req, res) => {
+  try {
+    const { subscription } = req.body;
+    if (!subscription || !subscription.endpoint) {
+      return res.status(400).json({ success: false, message: 'بيانات الاشتراك غير صحيحة' });
+    }
+
+    if (isMongoConnected()) {
+      const user = await User.findById(req.user._id);
+      if (!user) return res.status(404).json({ success: false, message: 'المستخدم غير موجود' });
+
+      // تأكد إن الاشتراك ما موجود مسبقاً
+      const exists = user.pushSubscriptions?.some(s => s.endpoint === subscription.endpoint);
+      if (!exists) {
+        user.pushSubscriptions = user.pushSubscriptions || [];
+        user.pushSubscriptions.push(subscription);
+        await user.save();
+      }
+      return res.json({ success: true, message: 'تم تفعيل الإشعارات' });
+    }
+
+    // fallback: الذاكرة
+    for (const [key, u] of memoryUsers.entries()) {
+      if (u.id === String(req.user._id || req.user.id)) {
+        u.pushSubscriptions = u.pushSubscriptions || [];
+        const exists = u.pushSubscriptions.some(s => s.endpoint === subscription.endpoint);
+        if (!exists) u.pushSubscriptions.push(subscription);
+        memoryUsers.set(key, u);
+        break;
+      }
+    }
+    res.json({ success: true, message: 'تم تفعيل الإشعارات' });
+  } catch (err) {
+    console.error('savePushSubscription error:', err);
+    res.status(500).json({ success: false, message: 'خطأ في حفظ الاشتراك' });
+  }
+};
+
+// ─── حفظ FCM Token (إشعارات Android الحقيقية) ───
+const saveFcmToken = async (req, res) => {
+  try {
+    const { fcmToken } = req.body;
+    if (!fcmToken || typeof fcmToken !== 'string') {
+      return res.status(400).json({ success: false, message: 'التوكن غير صحيح' });
+    }
+
+    if (isMongoConnected()) {
+      const user = await User.findById(req.user._id);
+      if (!user) return res.status(404).json({ success: false, message: 'المستخدم غير موجود' });
+
+      // تأكد إن التوكن ما موجود مسبقاً
+      if (!user.fcmTokens?.includes(fcmToken)) {
+        user.fcmTokens = user.fcmTokens || [];
+        user.fcmTokens.push(fcmToken);
+        await user.save();
+      }
+      console.log(`📱 FCM token saved for: ${user.name}`);
+      return res.json({ success: true, message: 'تم تفعيل إشعارات الموبايل' });
+    }
+
+    res.json({ success: true, message: 'تم تفعيل إشعارات الموبايل (محلياً)' });
+  } catch (err) {
+    console.error('saveFcmToken error:', err);
+    res.status(500).json({ success: false, message: 'خطأ في حفظ التوكن' });
+  }
+};
+
+// ─── إرجاع مفتاح VAPID العام ───
+const getVapidKey = (req, res) => {
+  const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY || 'BNhjdzcSNnjTeVfmRS0eBYrtbzIvamiClqWoKW3XA85M33pKaK66keSGOkhnJduUK5qGdWBrjE_eQEU9lVaBMsg';
+  res.json({ success: true, publicKey: VAPID_PUBLIC });
+};
+
+// ════════════════════════════════════════════════
+// ─── جلب كل بيانات المستخدم (استعادة كاملة) ───
+// ════════════════════════════════════════════════
+const getMyData = async (req, res) => {
+  try {
+    const user = req.user;
+    const userId = String(user._id || user.id);
+
+    // 1. بيانات المستخدم الأساسية
+    const sub = (user.subscription && typeof user.subscription.toObject === 'function')
+      ? user.subscription.toObject() : (user.subscription || {});
+    const isActive = sub.expiresAt && new Date(sub.expiresAt) > new Date();
+    const tier = isActive ? (['premium', 'yearly'].includes(sub.planId) ? 'premium' : 'pro') : 'free';
+
+    const userData = {
+      id: userId,
+      name: user.name,
+      identifier: user.identifier,
+      role: user.role,
+      avatar: user.avatar,
+      businessName: user.businessName || '',
+      businessId: user.businessId || null,
+      favorites: user.favorites || [],
+      settings: user.settings || {},
+      subscription: isActive
+        ? { ...sub, active: true, tier, daysLeft: Math.ceil((new Date(sub.expiresAt) - new Date()) / 864e5) }
+        : { active: false, tier: 'free' },
+    };
+
+    // 2. جلب كل أماكن المستخدم من قاعدة البيانات
+    let myPlaces = [];
+    if (isMongoConnected()) {
+      // 🔑 بحث بـ ObjectId فقط — المصدر الوحيد للملكية
+      myPlaces = await Place.find({
+        ownerId: userId,
+        isActive: true,
+      }).lean();
+    }
+
+    res.json({
+      success: true,
+      user: userData,
+      places: myPlaces,
+    });
+  } catch (err) {
+    console.error('getMyData error:', err);
+    res.status(500).json({ success: false, message: 'خطأ في جلب البيانات' });
+  }
+};
+
+// ─── حفظ إعدادات المستخدم ───
+const updateSettings = async (req, res) => {
+  try {
+    const { settings } = req.body;
+    if (!settings || typeof settings !== 'object') {
+      return res.status(400).json({ success: false, message: 'إعدادات غير صحيحة' });
+    }
+
+    if (isMongoConnected()) {
+      const user = await User.findByIdAndUpdate(
+        req.user._id,
+        { settings },
+        { new: true }
+      ).select('-password');
+      return res.json({ success: true, settings: user.settings });
+    }
+
+    // fallback: الذاكرة
+    for (const [key, u] of memoryUsers.entries()) {
+      if (u.id === String(req.user._id || req.user.id)) {
+        u.settings = settings;
+        memoryUsers.set(key, u);
+        return res.json({ success: true, settings });
+      }
+    }
+
+    res.json({ success: true, settings });
+  } catch (err) {
+    console.error('updateSettings error:', err);
+    res.status(500).json({ success: false, message: 'خطأ في حفظ الإعدادات' });
+  }
+};
+
+module.exports = { register, login, getMe, updateProfile, toggleFavorite, activateSubscription, getStats, requestPasswordReset, resetPassword, savePushSubscription, getVapidKey, saveFcmToken, getMyData, updateSettings };

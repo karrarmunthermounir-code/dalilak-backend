@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: dalilak-api
+    runtime: node
+    rootDir: .
+    buildCommand: npm install
+    startCommand: npm start
+    plan: free
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: FRONTEND_URL
+        value: https://dalilak-frontend.onrender.com
+      - key: BACKEND_URL
+        value: https://dalilak-api.onrender.com
+      - key: ALLOWED_ORIGINS
+        value: http://localhost:3000,http://localhost:5173,https://dalilak-frontend.onrender.com
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MONGO_URI
+        sync: false   # تحدده يدوياً في Render Dashboard
+      - key: ZAINCASH_MSISDN
+        sync: false
+      - key: ZAINCASH_MERCHANT
+        sync: false
+      - key: ZAINCASH_SECRET
+        sync: false
