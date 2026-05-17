@@ -7,7 +7,7 @@ const routes              = require('./routes');
 const paymentRouter       = require('./routes/payment');
 
 const app  = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dalilak-frontend.onrender.com';
 
 // ─── Middleware (Rate limiting + CORS + body parsers) ───
