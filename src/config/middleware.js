@@ -57,9 +57,11 @@ function applyMiddleware(app) {
 
   app.use(cors({
     origin: function (origin, callback) {
-      // ⚠️ مؤقت للتشخيص فقط — يقبل كل الأصول. أعِده للقائمة بعد الانتهاء.
-      console.log('🌐 Request origin:', origin);
-      return callback(null, true);
+      // طلبات بدون origin (تطبيقات الموبايل الأصلية، WebView، curl، Postman)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      console.warn(`⚠️ CORS blocked: ${origin}`);
+      return callback(new Error('غير مسموح — CORS'), false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
