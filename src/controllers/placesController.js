@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const Place = require('../models/Place');
 const User = require('../models/User');
 const admin = require('firebase-admin');
+const sendAdminEmail = require('../utils/sendAdminEmail');
 
 // ─── إعداد Firebase Admin لإرسال إشعارات FCM ───
 try {
@@ -38,7 +39,7 @@ const getAllPlaces = async (req, res) => {
     const { type, governorate, search, sort } = req.query;
 
     if (isDbConnected()) {
-      const filter = { isActive: true };
+      const filter = { isActive: true, status: 'approved' };
       if (type && type !== 'الكل') filter.type = type;
       if (governorate && governorate !== 'الكل') filter.governorate = governorate;
       if (search) filter.$or = [
@@ -125,6 +126,7 @@ const createPlace = async (req, res) => {
       // 🔑 المستخدم لازم يكون مسجل دخول — ownerId يجي دائماً من التوكن
       ownerId: req.user._id,
       isActive: true,
+      status: 'pending',
     };
 
     if (isDbConnected()) {
@@ -135,6 +137,18 @@ const createPlace = async (req, res) => {
         req.user._id,
         { $addToSet: { places: place._id } }
       );
+
+      // إشعار الأدمن بالإيميل (لا يحجب الاستجابة عند الفشل)
+      sendAdminEmail({
+        placeName: place.name,
+        placeType: place.type,
+        ownerName: req.user.name,
+        ownerEmail: req.user.identifier,
+        placeId: place._id,
+        description: place.description,
+        address: place.address,
+      }).catch(err => console.error('sendAdminEmail error:', err.message));
+
       return res.status(201).json({ success: true, data: place });
     }
 

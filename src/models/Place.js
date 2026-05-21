@@ -66,6 +66,20 @@ const placeSchema = new mongoose.Schema(
     // حالة النشر
     isActive: { type: Boolean, default: true },
 
+    // ─── حالة الموافقة من الأدمن ───
+    status: {
+      type: String,
+      enum: ['pending', 'approved', 'rejected'],
+      default: 'pending',
+      index: true,
+    },
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+    },
+    reviewedAt: { type: Date },
+    rejectionReason: { type: String, default: '' },
+
     // الميزات المتاحة
     features: [{ type: String }], // مثل: 'واي فاي', 'موقف سيارات', 'صالة عائلية'
 
