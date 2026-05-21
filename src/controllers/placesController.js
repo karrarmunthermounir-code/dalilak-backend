@@ -1,29 +1,9 @@
 const mongoose = require('mongoose');
 const Place = require('../models/Place');
 const User = require('../models/User');
-const admin = require('firebase-admin');
+const { admin } = require('../utils/firebase');
 const sendAdminEmail = require('../utils/sendAdminEmail');
-
-// ─── إعداد Firebase Admin لإرسال إشعارات FCM ───
-try {
-  if (!admin.apps.length) {
-    const creds = process.env.FIREBASE_CREDENTIALS
-      ? JSON.parse(process.env.FIREBASE_CREDENTIALS)
-      : null;
-    if (creds) {
-      // إصلاح مشكلة الـ private_key — تحويل \n النصية إلى أسطر جديدة حقيقية
-      if (creds.private_key) {
-        creds.private_key = creds.private_key.replace(/\\n/g, '\n');
-      }
-      admin.initializeApp({ credential: admin.credential.cert(creds) });
-      console.log('✅ Firebase Admin initialized');
-    } else {
-      console.warn('⚠️ FIREBASE_CREDENTIALS not set — push notifications disabled');
-    }
-  }
-} catch (err) {
-  console.error('❌ Firebase Admin init error:', err.message);
-}
+const { sendPushToAdmins } = require('../utils/sendPushNotification');
 
 // ══════════════════════════════════════════
 // ─── In-memory fallback عندما MongoDB غير متصل ───
@@ -148,6 +128,13 @@ const createPlace = async (req, res) => {
         description: place.description,
         address: place.address,
       }).catch(err => console.error('sendAdminEmail error:', err.message));
+
+      // إشعار Push للأدمن (لا يحجب الاستجابة عند الفشل)
+      sendPushToAdmins({
+        title: '📍 مكان جديد للمراجعة',
+        body: `${place.name} — من ${req.user.name}`,
+        data: { placeId: place._id.toString(), action: 'review' },
+      }).catch(err => console.error('sendPushToAdmins error:', err.message));
 
       return res.status(201).json({ success: true, data: place });
     }

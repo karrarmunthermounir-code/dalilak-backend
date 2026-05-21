@@ -16,6 +16,8 @@ const {
 
 const { protect, requireAdmin } = require('../middleware/auth');
 const Place = require('../models/Place');
+const User = require('../models/User');
+const { sendPushNotification } = require('../utils/sendPushNotification');
 
 // ─── مسارات الأدمن (يجب أن تأتي قبل /:id لتجنب التعارض) ───
 // GET /api/places/admin/pending — جلب الأماكن المعلقة
@@ -42,6 +44,22 @@ router.post('/admin/:id/approve', protect, requireAdmin, async (req, res) => {
     place.reviewedAt = new Date();
     await place.save();
 
+    // إشعار Push لصاحب المكان (لا يحجب الاستجابة عند الفشل)
+    if (place.ownerId) {
+      User.findById(place.ownerId).select('fcmTokens').lean()
+        .then(owner => {
+          if (owner?.fcmTokens?.length) {
+            return sendPushNotification({
+              fcmTokens: owner.fcmTokens,
+              title: '✅ تمت الموافقة!',
+              body: `مكانك "${place.name}" أصبح ظاهراً للجميع`,
+              data: { placeId: place._id.toString(), status: 'approved' },
+            });
+          }
+        })
+        .catch(err => console.error('approve push error:', err.message));
+    }
+
     res.json({ success: true, message: 'تم الموافقة على المكان' });
   } catch (err) {
     console.error('admin/approve error:', err);
@@ -61,6 +79,22 @@ router.post('/admin/:id/reject', protect, requireAdmin, async (req, res) => {
     place.reviewedBy = req.user._id;
     place.reviewedAt = new Date();
     await place.save();
+
+    // إشعار Push لصاحب المكان (لا يحجب الاستجابة عند الفشل)
+    if (place.ownerId) {
+      User.findById(place.ownerId).select('fcmTokens').lean()
+        .then(owner => {
+          if (owner?.fcmTokens?.length) {
+            return sendPushNotification({
+              fcmTokens: owner.fcmTokens,
+              title: '❌ لم تتم الموافقة',
+              body: `مكانك "${place.name}" — السبب: ${place.rejectionReason}`,
+              data: { placeId: place._id.toString(), status: 'rejected' },
+            });
+          }
+        })
+        .catch(err => console.error('reject push error:', err.message));
+    }
 
     res.json({ success: true, message: 'تم رفض المكان' });
   } catch (err) {
