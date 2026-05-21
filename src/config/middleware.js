@@ -32,10 +32,14 @@ function applyMiddleware(app) {
 
   // ─── 🔐 CORS — قائمة محددة من الأصول المسموحة ───
   // أصول تطبيق الموبايل (Capacitor / Ionic) + الويب
+  // ملاحظة: Capacitor على Android يرسل origin كـ "https://localhost"
   const MOBILE_ORIGINS = [
     'capacitor://localhost',
     'ionic://localhost',
     'http://localhost',
+    'https://localhost',     // ← Capacitor Android WebView
+    'http://localhost:5173',
+    'http://localhost:3000',
   ];
   const WEB_ORIGINS = [
     'https://dalilak-app.surge.sh',
@@ -57,7 +61,8 @@ function applyMiddleware(app) {
 
   app.use(cors({
     origin: function (origin, callback) {
-      // طلبات بدون origin (تطبيقات الموبايل الأصلية، WebView، curl، Postman)
+      console.log('🌐 Request origin:', origin);
+      // اسمح للطلبات بدون origin (mobile apps الأصلية، WebView، curl، Postman)
       if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
       console.warn(`⚠️ CORS blocked: ${origin}`);
