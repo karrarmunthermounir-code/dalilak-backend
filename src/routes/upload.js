@@ -1,64 +1,68 @@
 const express = require('express');
-const multer  = require('multer');
-const { v2: cloudinary } = require('cloudinary');
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const multer = require('multer');
+const ImageKit = require('imagekit');
+const { protect } = require('../middleware/auth');
 
 const router = express.Router();
 
-// ─── Cloudinary Config ───
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'demo',
-  api_key:    process.env.CLOUDINARY_API_KEY    || '',
-  api_secret: process.env.CLOUDINARY_API_SECRET || '',
-});
+// ─── تهيئة ImageKit (دفاعية — لا تُسقط السيرفر إن غابت المتغيرات) ───
+let imagekit = null;
+try {
+  if (process.env.IMAGEKIT_PUBLIC_KEY &&
+      process.env.IMAGEKIT_PRIVATE_KEY &&
+      process.env.IMAGEKIT_URL_ENDPOINT) {
+    imagekit = new ImageKit({
+      publicKey:   process.env.IMAGEKIT_PUBLIC_KEY,
+      privateKey:  process.env.IMAGEKIT_PRIVATE_KEY,
+      urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT,
+    });
+    console.log('✅ ImageKit initialized');
+  } else {
+    console.warn('⚠️ متغيرات ImageKit غير مضبوطة — رفع الصور معطّل');
+  }
+} catch (err) {
+  console.error('❌ ImageKit init error:', err.message);
+}
 
-// ─── Multer + Cloudinary Storage ───
-const storage = new CloudinaryStorage({
-  cloudinary,
-  params: {
-    folder: 'dalilak-menu',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
-    transformation: [
-      { width: 800, height: 800, crop: 'limit', quality: 'auto' }
-    ],
-  },
-});
-
-const upload = multer({ 
-  storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB كحدّ أقصى
 });
 
 // ════════════════════════════════════════════════
-// POST /api/upload — رفع صورة واحدة
+// POST /api/upload/image — رفع صورة واحدة (محمي)
 // ════════════════════════════════════════════════
-router.post('/', upload.single('image'), (req, res) => {
+router.post('/image', protect, upload.single('image'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: 'لم يتم اختيار صورة' });
+    if (!imagekit) {
+      return res.status(503).json({ success: false, message: 'خدمة رفع الصور غير مهيّأة' });
     }
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'لم يتم رفع أي صورة' });
+    }
+
+    const result = await imagekit.upload({
+      file: req.file.buffer,
+      fileName: `dalilak_${Date.now()}_${req.file.originalname || 'image'}`,
+      folder: '/dalilak',
+      useUniqueFileName: true,
+      transformation: {
+        pre: 'q-80', // ضغط 80%
+      },
+    });
+
     res.json({
       success: true,
-      url: req.file.path, // Cloudinary URL
-      public_id: req.file.filename,
+      url: result.url,
+      fileId: result.fileId,
     });
   } catch (err) {
-    console.error('Upload error:', err);
-    res.status(500).json({ success: false, message: 'فشل رفع الصورة' });
-  }
-});
-
-// ════════════════════════════════════════════════
-// DELETE /api/upload — حذف صورة
-// ════════════════════════════════════════════════
-router.delete('/', async (req, res) => {
-  try {
-    const { public_id } = req.body;
-    if (!public_id) return res.status(400).json({ success: false });
-    await cloudinary.uploader.destroy(public_id);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false });
+    console.error('Image upload failed:', err.message);
+    res.status(500).json({
+      success: false,
+      message: 'فشل رفع الصورة',
+      error: err.message,
+    });
   }
 });
 

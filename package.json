@@ -17,6 +17,7 @@
     "express": "^4.18.2",
     "express-rate-limit": "^8.5.2",
     "firebase-admin": "^13.9.0",
+    "imagekit": "^6.0.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^9.4.1",
     "multer": "^2.1.1",
