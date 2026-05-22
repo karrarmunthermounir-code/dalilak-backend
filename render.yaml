@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: dalilak-api
+    name: dalilak-backend-1
     runtime: node
     rootDir: .
     buildCommand: npm install
@@ -14,7 +14,7 @@ services:
       - key: FRONTEND_URL
         value: https://dalilak-frontend.onrender.com
       - key: BACKEND_URL
-        value: https://dalilak-api.onrender.com
+        value: https://dalilak-backend-1.onrender.com
       - key: ALLOWED_ORIGINS
         value: http://localhost:3000,http://localhost:5173,https://dalilak-frontend.onrender.com
       - key: JWT_SECRET
