@@ -356,6 +356,12 @@ const createBooking = async (req, res) => {
 const getBookingsForPlace = async (req, res) => {
   try {
     if (isDbConnected()) {
+      // تحقق الملكية — فقط صاحب المكان يرى حجوزاته
+      const place = await Place.findById(req.params.id).select('ownerId');
+      if (!place) return res.status(404).json({ success: false, message: 'المكان غير موجود' });
+      if (!place.ownerId || !place.ownerId.equals(req.user._id)) {
+        return res.status(403).json({ success: false, message: 'ليس لديك صلاحية لعرض هذه الحجوزات' });
+      }
       const bookings = await Booking.find({ placeId: req.params.id }).sort({ createdAt: -1 }).lean();
       return res.json({ success: true, count: bookings.length, data: bookings });
     }
@@ -376,6 +382,12 @@ const updateBookingStatus = async (req, res) => {
     }
 
     if (isDbConnected()) {
+      // تحقق الملكية — فقط صاحب المكان يعدّل حجوزاته
+      const place = await Place.findById(req.params.id).select('ownerId');
+      if (!place) return res.status(404).json({ success: false, message: 'المكان غير موجود' });
+      if (!place.ownerId || !place.ownerId.equals(req.user._id)) {
+        return res.status(403).json({ success: false, message: 'ليس لديك صلاحية لتعديل هذا الحجز' });
+      }
       const booking = await Booking.findOneAndUpdate(
         { _id: req.params.bookingId, placeId: req.params.id },
         { status },
