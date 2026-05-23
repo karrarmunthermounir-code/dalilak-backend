@@ -43,6 +43,8 @@ function applyMiddleware(app) {
   ];
   const WEB_ORIGINS = [
     'https://dalilak-app.surge.sh',
+    'https://dalilk.vercel.app',
+    'https://dalilk-theta.vercel.app',
     'http://localhost:3000',
     'http://localhost:5173',
     'http://localhost:5000',
@@ -59,12 +61,18 @@ function applyMiddleware(app) {
     allowedOrigins.push(process.env.FRONTEND_URL);
   }
 
+  // يقبل أي نشر Vercel لمشروع dalilk (الإنتاج + الفروع + الـ previews)
+  // مثال: https://dalilk-theta.vercel.app، https://dalilk-git-main-user.vercel.app
+  const isAllowedVercel = (origin) =>
+    /^https:\/\/dalilk(-[a-z0-9-]+)?\.vercel\.app$/i.test(origin);
+
   app.use(cors({
     origin: function (origin, callback) {
       console.log('🌐 Request origin:', origin);
       // اسمح للطلبات بدون origin (mobile apps الأصلية، WebView، curl، Postman)
       if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (isAllowedVercel(origin)) return callback(null, true);
       console.warn(`⚠️ CORS blocked: ${origin}`);
       return callback(new Error('غير مسموح — CORS'), false);
     },
