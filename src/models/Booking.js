@@ -12,6 +12,11 @@ const bookingSchema = new mongoose.Schema(
     time:      { type: String, default: '' },                 // وقت الحجز
     guests:    { type: Number, default: 2 },                  // عدد الأشخاص
     notes:     { type: String, default: '' },                 // ملاحظات
+    // ─── حقول حجز الغرف (للفنادق) ───
+    roomName:  { type: String, default: '' },                 // اسم/نوع الغرفة
+    checkIn:   { type: String, default: '' },                 // تاريخ الدخول
+    checkOut:  { type: String, default: '' },                 // تاريخ المغادرة
+    nights:    { type: Number, default: 0 },                  // عدد الليالي
     status:    { type: String, enum: ['pending', 'confirmed', 'rejected', 'cancelled'], default: 'pending' },
   },
   {

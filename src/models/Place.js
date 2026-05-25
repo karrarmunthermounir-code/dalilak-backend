@@ -13,6 +13,19 @@ const menuItemSchema = new mongoose.Schema({
 });
 
 // ==============================
+// نموذج الغرفة (للفنادق)
+// ==============================
+const roomSchema = new mongoose.Schema({
+  name:        { type: String, required: true },
+  description: { type: String, default: '' },
+  price:       { type: Number, default: 0 },      // السعر/الليلة
+  capacity:    { type: Number, default: 2 },      // عدد الأشخاص
+  images:      [{ type: String }],                // صور الغرفة (حتى 8)
+  amenities:   [{ type: String }],                // المرافق
+  isAvailable: { type: Boolean, default: true },  // متاحة للحجز
+});
+
+// ==============================
 // نموذج التقييم
 // ==============================
 const reviewSchema = new mongoose.Schema({
@@ -56,6 +69,9 @@ const placeSchema = new mongoose.Schema(
 
     // المنيو
     menu: [menuItemSchema],
+
+    // الغرف (للفنادق)
+    rooms: [roomSchema],
 
     // التقييمات
     reviews: [reviewSchema],

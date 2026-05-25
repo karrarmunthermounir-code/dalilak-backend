@@ -239,7 +239,7 @@ const memoryBookings = [];  // fallback فقط
 // POST /api/places/:id/bookings — زبون يحجز
 const createBooking = async (req, res) => {
   try {
-    const { name, phone, date, time, guests, notes } = req.body;
+    const { name, phone, date, time, guests, notes, roomName, checkIn, checkOut, nights } = req.body;
     if (!name || !phone) return res.status(400).json({ success: false, message: 'الاسم والهاتف مطلوبان' });
 
     let booking;
@@ -251,6 +251,10 @@ const createBooking = async (req, res) => {
         name, phone, date, time,
         guests: guests || 2,
         notes: notes || '',
+        roomName: roomName || '',
+        checkIn:  checkIn  || '',
+        checkOut: checkOut || '',
+        nights:   nights   || 0,
         status: 'pending',
       });
       await doc.save();
@@ -263,6 +267,10 @@ const createBooking = async (req, res) => {
         name, phone, date, time,
         guests: guests || 2,
         notes: notes || '',
+        roomName: roomName || '',
+        checkIn:  checkIn  || '',
+        checkOut: checkOut || '',
+        nights:   nights   || 0,
         status: 'pending',
         createdAt: new Date().toISOString(),
       };
