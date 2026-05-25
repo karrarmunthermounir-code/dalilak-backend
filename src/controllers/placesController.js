@@ -13,10 +13,17 @@ const isDbConnected = () => mongoose.connection.readyState === 1;
 
 // ==============================
 // GET /api/places
+// ─── Pagination opt-in: لو ?page موجود نُقسّم، وإلا نعيد الكل (السلوك القديم) ───
+// مثال: GET /api/places?page=1&limit=20
 // ==============================
 const getAllPlaces = async (req, res) => {
   try {
     const { type, governorate, search, sort } = req.query;
+    const hasPage = req.query.page !== undefined;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    // الحد الأقصى المسموح: 100/طلب (يحمي من الإفراط)
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
 
     if (isDbConnected()) {
       const filter = { isActive: true, status: 'approved' };
@@ -31,8 +38,17 @@ const getAllPlaces = async (req, res) => {
       let sortOption = { isFeatured: -1, createdAt: -1 };
       if (sort === 'rating') sortOption = { isFeatured: -1, averageRating: -1 };
       if (sort === 'name') sortOption = { isFeatured: -1, name: 1 };
-      const places = await Place.find(filter).select('-__v').sort(sortOption).lean();
-      return res.json({ success: true, count: places.length, data: places });
+
+      let query = Place.find(filter).select('-__v').sort(sortOption);
+      if (hasPage) query = query.skip(skip).limit(limit);
+      const places = await query.lean();
+
+      const response = { success: true, count: places.length, data: places };
+      if (hasPage) {
+        const total = await Place.countDocuments(filter);
+        response.pagination = { page, limit, total, pages: Math.ceil(total / limit) };
+      }
+      return res.json(response);
     }
 
     // ─── Fallback: in-memory ───
@@ -45,6 +61,15 @@ const getAllPlaces = async (req, res) => {
         p.name?.toLowerCase().includes(q) ||
         p.description?.toLowerCase().includes(q)
       );
+    }
+
+    if (hasPage) {
+      const total = result.length;
+      const sliced = result.slice(skip, skip + limit);
+      return res.json({
+        success: true, count: sliced.length, data: sliced, source: 'memory',
+        pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+      });
     }
     res.json({ success: true, count: result.length, data: result, source: 'memory' });
   } catch (error) {
@@ -361,8 +386,14 @@ const createBooking = async (req, res) => {
 };
 
 // GET /api/places/:id/bookings — صاحب المكان يشوف حجوزاته
+// ─── Pagination opt-in: لو ?page موجود نُقسّم، وإلا نعيد الكل (السلوك القديم) ───
 const getBookingsForPlace = async (req, res) => {
   try {
+    const hasPage = req.query.page !== undefined;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+
     if (isDbConnected()) {
       // تحقق الملكية — فقط صاحب المكان يرى حجوزاته
       const place = await Place.findById(req.params.id).select('ownerId');
@@ -370,12 +401,27 @@ const getBookingsForPlace = async (req, res) => {
       if (!place.ownerId || !place.ownerId.equals(req.user._id)) {
         return res.status(403).json({ success: false, message: 'ليس لديك صلاحية لعرض هذه الحجوزات' });
       }
-      const bookings = await Booking.find({ placeId: req.params.id }).sort({ createdAt: -1 }).lean();
-      return res.json({ success: true, count: bookings.length, data: bookings });
+      let query = Booking.find({ placeId: req.params.id }).sort({ createdAt: -1 });
+      if (hasPage) query = query.skip(skip).limit(limit);
+      const bookings = await query.lean();
+
+      const response = { success: true, count: bookings.length, data: bookings };
+      if (hasPage) {
+        const total = await Booking.countDocuments({ placeId: req.params.id });
+        response.pagination = { page, limit, total, pages: Math.ceil(total / limit) };
+      }
+      return res.json(response);
     }
     // Fallback
-    const bookings = memoryBookings.filter(b => b.placeId === req.params.id);
-    res.json({ success: true, count: bookings.length, data: bookings });
+    const all = memoryBookings.filter(b => b.placeId === req.params.id);
+    if (hasPage) {
+      const sliced = all.slice(skip, skip + limit);
+      return res.json({
+        success: true, count: sliced.length, data: sliced,
+        pagination: { page, limit, total: all.length, pages: Math.ceil(all.length / limit) },
+      });
+    }
+    res.json({ success: true, count: all.length, data: all });
   } catch (error) {
     res.status(500).json({ success: false, message: 'خطأ في جلب الحجوزات' });
   }
@@ -459,10 +505,30 @@ const getMyPlace = async (req, res) => {
 // ==============================
 // PUT /api/places/:id — تعديل المكان (مع التحقق من الملكية)
 // ==============================
+// 🔒 whitelist صارم: فقط الحقول المُصرَّح بها تُحدّث.
+// المالك لا يقدر يعدّل: ownerId, status, isFeatured, isActive, type,
+// reviews, averageRating, stats, reviewedBy/At, rejectionReason, timestamps, _id.
+const PLACE_UPDATE_WHITELIST = [
+  'name', 'description', 'governorate', 'area', 'address',
+  'phone', 'openHours', 'priceRange',
+  'images', 'imageFiles',
+  'location', 'mapLink',
+  'features',
+  'menu', 'menuImage',
+  'rooms',
+];
+
+const sanitizePlaceUpdates = (body = {}) => {
+  const sanitized = {};
+  for (const key of PLACE_UPDATE_WHITELIST) {
+    if (body[key] !== undefined) sanitized[key] = body[key];
+  }
+  return sanitized;
+};
+
 const updatePlace = async (req, res) => {
   try {
-    const updates = req.body;
-    delete updates._id; // لا تحدّث الـ ID
+    const updates = sanitizePlaceUpdates(req.body);
 
     if (isDbConnected()) {
       const place = await Place.findById(req.params.id);
@@ -473,7 +539,7 @@ const updatePlace = async (req, res) => {
         return res.status(403).json({ success: false, message: 'ليس لديك صلاحية تعديل هذا المكان' });
       }
 
-      // تطبيق التعديلات
+      // تطبيق التعديلات (الحقول المُصفّاة فقط)
       Object.assign(place, updates);
       await place.save();
       return res.json({ success: true, data: place.toObject() });

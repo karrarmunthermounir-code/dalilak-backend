@@ -31,6 +31,19 @@ const PLANS = {
 
 // ─── مخازن مؤقتة للطلبات (يمكن استبدالها بـ MongoDB لاحقاً) ───
 const pendingOrders = new Map();
+// ─── طلبات مدفوعة بانتظار التفعيل (ينتقل إليها الـ orderId بعد نجاح ZainCash callback) ───
+// activateSubscription يتحقق من وجود orderId هنا قبل التفعيل، ثم يحذفه (استهلاك مرة واحدة)
+const paidOrders = new Map();
+// تنظيف الطلبات المدفوعة الأقدم من ساعة (حماية من نمو ذاكرة غير محدود)
+const PAID_ORDER_TTL_MS = 60 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [orderId, order] of paidOrders.entries()) {
+    if (now - new Date(order.paidAt).getTime() > PAID_ORDER_TTL_MS) {
+      paidOrders.delete(orderId);
+    }
+  }
+}, 10 * 60 * 1000).unref?.();
 
 // ════════════════════════════════════════════════
 // 1. إنشاء طلب دفع ZainCash — POST /api/payment/zaincash/init
@@ -54,7 +67,15 @@ router.post('/zaincash/init', async (req, res) => {
     // ─── وضع Demo ───
     if (ZAINCASH.MERCHANT_ID === 'YOUR_MERCHANT_ID') {
       console.log('[DEMO] ZainCash payment for order:', orderId);
-      const demoUrl = `${FRONTEND_URL}/payment/success?orderId=${orderId}&demo=true`;
+      // في الـ Demo نمرّ مباشرة إلى paidOrders (نتظاهر بنجاح الدفع)
+      paidOrders.set(orderId, {
+        ...pendingOrders.get(orderId),
+        paidAt: new Date().toISOString(),
+        consumed: false,
+        demo: true,
+      });
+      pendingOrders.delete(orderId);
+      const demoUrl = `${FRONTEND_URL}/payment/success?orderId=${orderId}&demo=true&plan=${plan.id}`;
       return res.json({ success: true, payUrl: demoUrl, orderId, demo: true });
     }
 
@@ -112,7 +133,15 @@ function handleCallback(req, res) {
     const order = pendingOrders.get(orderId);
     if (order) {
       pendingOrders.delete(orderId);
-      console.log(`✅ Payment callback — order: ${orderId} plan: ${order.planName}`);
+      // ─── انقل الطلب إلى paidOrders حتى يتمكن activateSubscription من التحقق من الدفع ───
+      paidOrders.set(orderId, {
+        ...order,
+        paidAt: new Date().toISOString(),
+        consumed: false,
+      });
+      console.log(`✅ Payment callback — order: ${orderId} plan: ${order.planName} (queued for activation)`);
+    } else {
+      console.warn(`⚠️ Callback for unknown orderId: ${orderId}`);
     }
 
     return res.redirect(`${FRONTEND_URL}/payment/success?orderId=${orderId}&plan=${order?.planId || ''}`);
@@ -128,5 +157,21 @@ router.get('/callback',  handleCallback);
 // ─── مساعدات لـ /api/health ───
 router.getMode         = () => (ZAINCASH.MERCHANT_ID === 'YOUR_MERCHANT_ID' ? 'demo' : 'production');
 router.getPendingCount = () => pendingOrders.size;
+
+// ─── API داخلي لـ activateSubscription: استهلاك طلب مدفوع لمرة واحدة ───
+// يُرجِع الـ order إذا موجود وغير مستهلك، أو null لو غير صالح/مستهلك.
+// بعد الاستدعاء يُعتبر الطلب مستهلكاً ولا يصح إعادة استخدامه.
+router.consumePaidOrder = function (orderId) {
+  if (!orderId) return null;
+  const order = paidOrders.get(orderId);
+  if (!order) return null;
+  if (order.consumed) return null;
+  order.consumed = true;
+  paidOrders.set(orderId, order);
+  // احذفه بعد التسوية حتى لا يتراكم
+  setTimeout(() => paidOrders.delete(orderId), 5000).unref?.();
+  return order;
+};
+router.PLANS = PLANS;
 
 module.exports = router;

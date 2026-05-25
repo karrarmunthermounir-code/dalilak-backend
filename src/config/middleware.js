@@ -82,8 +82,10 @@ function applyMiddleware(app) {
   }));
 
   // ─── Body parsers ───
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+  // 🔒 خفّضنا الحد من 50mb إلى 10mb لتقليل سطح الـ DoS.
+  // الصور تُرفَع لـ ImageKit عبر multipart (5mb لكل صورة) — JSON هنا للبيانات النصية + base64 fallback.
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 }
 
 module.exports = { applyMiddleware };

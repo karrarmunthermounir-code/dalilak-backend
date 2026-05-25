@@ -4,6 +4,8 @@ const { generateToken } = require('../middleware/auth');
 const mongoose = require('mongoose');
 const nodemailer = require('nodemailer');
 const bcrypt   = require('bcryptjs');
+// ─── للتحقق من الدفع قبل تفعيل الاشتراك ───
+const paymentRouter = require('../routes/payment');
 
 // ─── مخزن في الذاكرة كـ fallback عند عدم توفر MongoDB ───
 const memoryUsers = new Map();
@@ -294,16 +296,64 @@ const toggleFavorite = async (req, res) => {
 };
 
 // ─── تفعيل الاشتراك ───
+// 🔒 تحقق صارم من الدفع: لا يقبل أي خطة مدفوعة بدون orderId صالح من callback ZainCash.
+// الاستثناء الوحيد: free_trial (تجربة مجانية لمرة واحدة لكل مستخدم).
 const activateSubscription = async (req, res) => {
   try {
-    const { planId, planName } = req.body;
+    const { planId, planName, orderId } = req.body;
     const DURATIONS = { free_trial: 30, monthly_pro: 30, pro: 30, premium: 365, yearly: 365 };
+
+    // ─── خطط مجانية (مسموح بدون orderId) ───
+    const FREE_PLANS = ['free_trial'];
+    const isFreePlan = FREE_PLANS.includes(planId);
+
+    // ─── إذا الخطة مدفوعة: لازم orderId صالح من callback ZainCash ───
+    let paidOrder = null;
+    if (!isFreePlan) {
+      if (!orderId) {
+        return res.status(400).json({
+          success: false,
+          message: 'لا يمكن تفعيل اشتراك مدفوع بدون إثبات دفع (orderId مفقود)',
+        });
+      }
+      paidOrder = paymentRouter.consumePaidOrder(orderId);
+      if (!paidOrder) {
+        return res.status(402).json({
+          success: false,
+          message: 'لم نتمكن من التحقق من الدفع. إذا تم خصم المبلغ، تواصل مع الدعم.',
+        });
+      }
+      // تأكد إن planId المُرسَل يطابق الخطة المدفوعة (لا يقدر يدفع شهري ويفعّل سنوي)
+      if (paidOrder.planId && paidOrder.planId !== planId) {
+        return res.status(400).json({
+          success: false,
+          message: 'الخطة المطلوبة لا تطابق الخطة المدفوعة',
+        });
+      }
+    }
+
+    // ─── منع تفعيل free_trial مرتين لنفس المستخدم ───
+    if (isFreePlan && isMongoConnected()) {
+      const existing = await User.findById(req.user._id).select('subscription');
+      if (existing?.subscription?.planId === 'free_trial' && existing.subscription.activatedAt) {
+        return res.status(403).json({
+          success: false,
+          message: 'لقد استخدمت التجربة المجانية مسبقاً',
+        });
+      }
+    }
+
     const days = DURATIONS[planId] || 30;
     const now = new Date();
     const expiresAt = new Date(now.getTime() + days * 864e5);
     const tier = 'premium'; // كل الخطط تمنح كل المميزات
 
     const subObj = { planId, planName, status: 'active', activatedAt: now, expiresAt };
+    if (paidOrder) {
+      console.log(`💰 Subscription activated for ${req.user.identifier} via paid order: ${orderId} (${planId})`);
+    } else {
+      console.log(`🎁 Free trial activated for ${req.user.identifier}`);
+    }
 
     if (isMongoConnected()) {
       await User.findByIdAndUpdate(req.user._id, { subscription: subObj });
@@ -438,12 +488,13 @@ const requestPasswordReset = async (req, res) => {
       console.log(`\n📱 [OTP SMS] رقم: ${id} — الكود: ${otp} — (10 دقائق)\n`);
     }
 
-    const isDev = !process.env.EMAIL_USER; // وضع التطوير
+    // 🔒 devOtp يُرجَع فقط في التطوير المحلي (لا أبداً في الإنتاج)
+    const isDev = process.env.NODE_ENV !== 'production' && !process.env.EMAIL_USER;
     res.json({
       success: true,
       message: isEmail ? 'تم إرسال الكود إلى بريدك الإلكتروني' : 'تم إرسال الكود إلى رقمك عبر SMS',
       method: isEmail ? 'email' : 'sms',
-      // في وضع التطوير فقط — لا ترسله في الإنتاج!
+      // 🔒 في وضع التطوير المحلي فقط — لا يُرسَل أبداً في الإنتاج (NODE_ENV=production)
       devOtp: isDev ? otp : undefined,
     });
   } catch (err) {
