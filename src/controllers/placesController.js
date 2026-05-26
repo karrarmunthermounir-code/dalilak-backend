@@ -3,7 +3,7 @@ const Place = require('../models/Place');
 const User = require('../models/User');
 const { admin } = require('../utils/firebase');
 const sendAdminEmail = require('../utils/sendAdminEmail');
-const { sendPushToAdmins } = require('../utils/sendPushNotification');
+const { sendPushToAdmins, sendPushNotification } = require('../utils/sendPushNotification');
 
 // ══════════════════════════════════════════
 // ─── In-memory fallback عندما MongoDB غير متصل ───
@@ -220,8 +220,40 @@ const addReview = async (req, res) => {
     if (isDbConnected()) {
       const place = await Place.findById(req.params.id);
       if (!place) return res.status(404).json({ success: false, message: 'المكان غير موجود' });
-      place.reviews.push({ author, rating: Number(rating), comment });
+      const numRating = Number(rating);
+      place.reviews.push({ author, rating: numRating, comment });
       await place.save();
+
+      // ─── إشعار Push لصاحب المكان بتقييم جديد (لا يحجب الاستجابة) ───
+      if (place.ownerId) {
+        User.findById(place.ownerId).select('fcmTokens name').lean()
+          .then(owner => {
+            if (!owner?.fcmTokens?.length) return;
+            const stars = '⭐'.repeat(numRating);
+            const isLow = numRating <= 2;
+            const title = isLow
+              ? '⚠️ تقييم منخفض — يحتاج ردّ سريع'
+              : '⭐ تقييم جديد لمكانك!';
+            const trimmed = comment
+              ? ` — "${String(comment).slice(0, 80)}${String(comment).length > 80 ? '…' : ''}"`
+              : '';
+            const body = `${stars} (${numRating}/5) من ${author} على ${place.name}${trimmed}`;
+            return sendPushNotification({
+              fcmTokens: owner.fcmTokens,
+              title,
+              body,
+              data: {
+                type: 'review',
+                placeId: place._id.toString(),
+                rating: numRating,
+                author,
+                lowRating: isLow ? '1' : '0',
+              },
+            });
+          })
+          .catch(err => console.error('review push error:', err.message));
+      }
+
       return res.status(201).json({ success: true, data: { reviews: place.reviews, averageRating: place.averageRating } });
     }
     // Fallback
@@ -329,9 +361,13 @@ const createBooking = async (req, res) => {
           ],
         });
         if (owner && owner.fcmTokens?.length > 0) {
+          // نُضمّن ملاحظة الزبون في جسم الإشعار (مختصرة 80 حرف) ليراها المالك فوراً
+          const trimmedNotes = notes
+            ? ` — 💬 ${notes.slice(0, 80)}${notes.length > 80 ? '…' : ''}`
+            : '';
           const notification = {
             title: '🔔 حجز جديد!',
-            body: `${name} حجز طاولة في ${place.name} — ${date || 'بدون تاريخ'} ${time || ''}`,
+            body: `${name} حجز ${roomName ? `غرفة "${roomName}"` : 'طاولة'} في ${place.name} — ${date || checkIn || 'بدون تاريخ'} ${time || ''}${trimmedNotes}`,
           };
           const expiredIndexes = [];
           const sendResults = await Promise.allSettled(
@@ -356,6 +392,7 @@ const createBooking = async (req, res) => {
                   bookingId: booking._id.toString(),
                   customerName: name,
                   customerPhone: phone,
+                  customerNotes: notes || '',
                 },
               }).catch(err => {
                 if (err.code === 'messaging/registration-token-not-registered' ||
