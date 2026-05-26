@@ -36,13 +36,19 @@ router.get('/admin/pending', protect, requireAdmin, async (req, res) => {
 // POST /api/places/admin/:id/approve — موافقة على مكان
 router.post('/admin/:id/approve', protect, requireAdmin, async (req, res) => {
   try {
-    const place = await Place.findById(req.params.id);
+    // تحديث ذرّي + إرجاع المستند المُحدَّث في خطوة واحدة (يحلّ race condition)
+    const place = await Place.findByIdAndUpdate(
+      req.params.id,
+      {
+        $set: {
+          status: 'approved',
+          reviewedBy: req.user._id,
+          reviewedAt: new Date(),
+        },
+      },
+      { new: true }
+    );
     if (!place) return res.status(404).json({ success: false, message: 'غير موجود' });
-
-    place.status = 'approved';
-    place.reviewedBy = req.user._id;
-    place.reviewedAt = new Date();
-    await place.save();
 
     // إشعار Push لصاحب المكان (لا يحجب الاستجابة عند الفشل)
     if (place.ownerId) {
@@ -60,7 +66,7 @@ router.post('/admin/:id/approve', protect, requireAdmin, async (req, res) => {
         .catch(err => console.error('approve push error:', err.message));
     }
 
-    res.json({ success: true, message: 'تم الموافقة على المكان' });
+    res.json({ success: true, message: 'تم الموافقة على المكان', place });
   } catch (err) {
     console.error('admin/approve error:', err);
     res.status(500).json({ success: false, message: 'خطأ في الموافقة' });
@@ -71,14 +77,20 @@ router.post('/admin/:id/approve', protect, requireAdmin, async (req, res) => {
 router.post('/admin/:id/reject', protect, requireAdmin, async (req, res) => {
   try {
     const { reason } = req.body;
-    const place = await Place.findById(req.params.id);
+    // تحديث ذرّي ثم جلب المستند المُحدَّث
+    const place = await Place.findByIdAndUpdate(
+      req.params.id,
+      {
+        $set: {
+          status: 'rejected',
+          rejectionReason: reason || 'لم يستوفِ الشروط',
+          reviewedBy: req.user._id,
+          reviewedAt: new Date(),
+        },
+      },
+      { new: true }
+    );
     if (!place) return res.status(404).json({ success: false, message: 'غير موجود' });
-
-    place.status = 'rejected';
-    place.rejectionReason = reason || 'لم يستوفِ الشروط';
-    place.reviewedBy = req.user._id;
-    place.reviewedAt = new Date();
-    await place.save();
 
     // إشعار Push لصاحب المكان (لا يحجب الاستجابة عند الفشل)
     if (place.ownerId) {
@@ -96,7 +108,7 @@ router.post('/admin/:id/reject', protect, requireAdmin, async (req, res) => {
         .catch(err => console.error('reject push error:', err.message));
     }
 
-    res.json({ success: true, message: 'تم رفض المكان' });
+    res.json({ success: true, message: 'تم رفض المكان', place });
   } catch (err) {
     console.error('admin/reject error:', err);
     res.status(500).json({ success: false, message: 'خطأ في الرفض' });
