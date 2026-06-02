@@ -38,7 +38,6 @@ function resolveZainCashUrls(envUrl) {
 const { API_URL: ZC_API_URL, PAY_URL: ZC_PAY_URL } = resolveZainCashUrls(process.env.ZAINCASH_API_URL);
 
 const ZAINCASH = {
-  MODE:        ZAINCASH_MODE || 'demo',
   MSISDN:      process.env.ZAINCASH_MSISDN     || '',
   MERCHANT_ID: process.env.ZAINCASH_MERCHANT_ID || '',
   SECRET_KEY:  process.env.ZAINCASH_API_KEY     || '',
@@ -48,19 +47,28 @@ const ZAINCASH = {
   PAY_URL:     ZC_PAY_URL,
 };
 
-// ─── شرط Demo: production يتطلب الـ creds الثلاثة + MSISDN؛ خلاف ذلك Demo ───
-const CREDS_OK = ZAINCASH.MERCHANT_ID && ZAINCASH.SECRET_KEY && ZAINCASH.MSISDN;
-const IS_DEMO  = !IS_PRODUCTION || !CREDS_OK;
+// ─── ZainCash production-only: لا fallback إطلاقاً ───
+//   إذا ZAINCASH_MODE !== 'production' أو أي من (MERCHANT_ID / API_KEY / MSISDN) فارغ
+//   → /zaincash/init يرجع 503 صريح. لا Demo mode، لا تفعيل بدون دفع.
+const MISSING_CREDS = [];
+if (!ZAINCASH.MERCHANT_ID) MISSING_CREDS.push('ZAINCASH_MERCHANT_ID');
+if (!ZAINCASH.SECRET_KEY)  MISSING_CREDS.push('ZAINCASH_API_KEY');
+if (!ZAINCASH.MSISDN)      MISSING_CREDS.push('ZAINCASH_MSISDN');
+const CREDS_OK     = MISSING_CREDS.length === 0;
+const IS_CONFIGURED = IS_PRODUCTION && CREDS_OK;
 
-// ─── سجل عند الإقلاع (بدون تسريب المفتاح) ───
 console.log(
-  `[ZainCash] mode=${IS_DEMO ? 'DEMO' : 'PRODUCTION'} ` +
-  `(ZAINCASH_MODE="${ZAINCASH_MODE || '(unset)'}", credsOK=${!!CREDS_OK}) ` +
+  `[ZainCash] mode=${IS_CONFIGURED ? 'PRODUCTION' : 'MISCONFIGURED'} ` +
+  `(ZAINCASH_MODE="${ZAINCASH_MODE || '(unset)'}", credsOK=${CREDS_OK}) ` +
   `apiUrl=${ZAINCASH.API_URL}`
 );
-if (IS_PRODUCTION && !CREDS_OK) {
-  console.warn('[ZainCash] ⚠️ ZAINCASH_MODE=production لكن أحد المتغيرات مفقود — سيُفعَّل Demo mode كاحتياط.');
-  console.warn(`           merchant_id=${ZAINCASH.MERCHANT_ID ? 'set' : 'MISSING'}, api_key=${ZAINCASH.SECRET_KEY ? 'set' : 'MISSING'}, msisdn=${ZAINCASH.MSISDN ? 'set' : 'MISSING'}`);
+if (!IS_CONFIGURED) {
+  if (!IS_PRODUCTION) {
+    console.error(`[ZainCash] ❌ ZAINCASH_MODE != "production" (current="${ZAINCASH_MODE || '(unset)'}") — /zaincash/init will reject all requests.`);
+  }
+  if (MISSING_CREDS.length) {
+    console.error(`[ZainCash] ❌ Missing env vars: ${MISSING_CREDS.join(', ')}`);
+  }
 }
 
 const PLANS = {
@@ -90,6 +98,16 @@ setInterval(() => {
 // ════════════════════════════════════════════════
 router.post('/zaincash/init', async (req, res) => {
   try {
+    // ─── Guard: لا تفعيل دفع إذا ZainCash غير مهيأ ───
+    if (!IS_CONFIGURED) {
+      console.error(`[ZainCash] init rejected — misconfigured. missing=${MISSING_CREDS.join(',') || 'none'} mode="${ZAINCASH_MODE}"`);
+      return res.status(503).json({
+        success: false,
+        error: 'ZainCash غير مهيأ — اتصل بالدعم',
+        misconfigured: true,
+      });
+    }
+
     const { planId, name, phone, email } = req.body;
     const planKey = planId === 'monthly_pro' || planId === 'monthly' ? 'monthly' : 'yearly';
     const plan = PLANS[planKey];
@@ -103,21 +121,6 @@ router.post('/zaincash/init', async (req, res) => {
       plan, name, phone, email,
       createdAt: new Date().toISOString(),
     });
-
-    // ─── وضع Demo ───
-    if (IS_DEMO) {
-      console.log('[DEMO] ZainCash payment for order:', orderId);
-      // في الـ Demo نمرّ مباشرة إلى paidOrders (نتظاهر بنجاح الدفع)
-      paidOrders.set(orderId, {
-        ...pendingOrders.get(orderId),
-        paidAt: new Date().toISOString(),
-        consumed: false,
-        demo: true,
-      });
-      pendingOrders.delete(orderId);
-      const demoUrl = `${FRONTEND_URL}/payment/success?orderId=${orderId}&demo=true&plan=${plan.id}`;
-      return res.json({ success: true, payUrl: demoUrl, orderId, demo: true });
-    }
 
     // ─── ZainCash حقيقي (Production) ───
     // ملاحظة: msisdn في الـ payload هو رقم التاجر المسجل لدى ZainCash (ZAINCASH_MSISDN)
@@ -210,8 +213,28 @@ function handleCallback(req, res) {
 router.post('/callback', handleCallback);
 router.get('/callback',  handleCallback);
 
+// ════════════════════════════════════════════════
+// 3. تشخيص الحالة العامة — GET /api/payment/zaincash/status
+// ════════════════════════════════════════════════
+// عام/آمن: لا يكشف القيم الفعلية، فقط ما هو موجود وما هو مفقود.
+router.get('/zaincash/status', (req, res) => {
+  res.json({
+    mode: IS_CONFIGURED ? 'production' : 'misconfigured',
+    envMode: ZAINCASH_MODE || null,
+    hasMerchantId: !!ZAINCASH.MERCHANT_ID,
+    hasApiKey:     !!ZAINCASH.SECRET_KEY,
+    hasMsisdn:     !!ZAINCASH.MSISDN,
+    apiUrl:        ZAINCASH.API_URL,
+    payUrl:        ZAINCASH.PAY_URL,
+    redirectUrl:   ZAINCASH.REDIRECT,
+    missing:       MISSING_CREDS,
+    pendingOrders: pendingOrders.size,
+    paidOrders:    paidOrders.size,
+  });
+});
+
 // ─── مساعدات لـ /api/health ───
-router.getMode         = () => (IS_DEMO ? 'demo' : 'production');
+router.getMode         = () => (IS_CONFIGURED ? 'production' : 'misconfigured');
 router.getPendingCount = () => pendingOrders.size;
 
 // ─── API داخلي لـ activateSubscription: استهلاك طلب مدفوع لمرة واحدة ───
