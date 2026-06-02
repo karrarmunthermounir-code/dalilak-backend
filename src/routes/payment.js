@@ -37,12 +37,30 @@ function resolveZainCashUrls(envUrl) {
 
 const { API_URL: ZC_API_URL, PAY_URL: ZC_PAY_URL } = resolveZainCashUrls(process.env.ZAINCASH_API_URL);
 
+// ─── تنظيف قيمة env من المشاكل الشائعة (مسافات/سطور/اقتباسات) ───
+// السبب: Render أو ZainCash dashboard أحياناً يضيفون trailing whitespace
+// أو علامات اقتباس عند النسخ — وهذا يكسر تنسيق merchantId (24 hex بالضبط)
+// ويسبب رد `{err: "invalid_merchant_id"}` من ZainCash.
+function cleanEnv(v) {
+  if (v == null) return '';
+  let s = String(v).trim();
+  if (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  // إزالة أي whitespace داخلي محتمل (مسافات، tabs، newlines)
+  s = s.replace(/\s+/g, '');
+  return s;
+}
+
 const ZAINCASH = {
-  MSISDN:      process.env.ZAINCASH_MSISDN     || '',
-  MERCHANT_ID: process.env.ZAINCASH_MERCHANT_ID || '',
-  SECRET_KEY:  process.env.ZAINCASH_API_KEY     || '',
-  SERVICE:     process.env.ZAINCASH_SERVICE     || 'دليلك - اشتراك',
-  REDIRECT:    process.env.ZAINCASH_REDIRECT    || `${process.env.BACKEND_URL || 'https://dalilak-api.onrender.com'}/api/payment/callback`,
+  MSISDN:      cleanEnv(process.env.ZAINCASH_MSISDN),
+  MERCHANT_ID: cleanEnv(process.env.ZAINCASH_MERCHANT_ID),
+  SECRET_KEY:  cleanEnv(process.env.ZAINCASH_API_KEY),
+  SERVICE:     (process.env.ZAINCASH_SERVICE  || 'دليلك - اشتراك').trim(),
+  REDIRECT:    cleanEnv(process.env.ZAINCASH_REDIRECT) || `${cleanEnv(process.env.BACKEND_URL) || 'https://dalilak-api.onrender.com'}/api/payment/callback`,
   API_URL:     ZC_API_URL,
   PAY_URL:     ZC_PAY_URL,
 };
@@ -216,18 +234,54 @@ router.get('/callback',  handleCallback);
 // ════════════════════════════════════════════════
 // 3. تشخيص الحالة العامة — GET /api/payment/zaincash/status
 // ════════════════════════════════════════════════
-// عام/آمن: لا يكشف القيم الفعلية، فقط ما هو موجود وما هو مفقود.
+// عام/آمن: لا يكشف القيم الفعلية، فقط شكلها (الطول، صحة التنسيق، أول/آخر 4 أحرف).
+function preview(s) {
+  if (!s) return '(empty)';
+  if (s.length <= 8) return '(too short)';
+  return s.slice(0, 4) + '...' + s.slice(-4);
+}
+
 router.get('/zaincash/status', (req, res) => {
+  const merchantId = ZAINCASH.MERCHANT_ID;
+  const msisdn     = ZAINCASH.MSISDN;
+  const apiKey     = ZAINCASH.SECRET_KEY;
+
   res.json({
     mode: IS_CONFIGURED ? 'production' : 'misconfigured',
     envMode: ZAINCASH_MODE || null,
-    hasMerchantId: !!ZAINCASH.MERCHANT_ID,
-    hasApiKey:     !!ZAINCASH.SECRET_KEY,
-    hasMsisdn:     !!ZAINCASH.MSISDN,
+
+    // التواجد (موجود أم لا)
+    hasMerchantId: !!merchantId,
+    hasApiKey:     !!apiKey,
+    hasMsisdn:     !!msisdn,
+    missing:       MISSING_CREDS,
+
+    // تشخيص تنسيق merchantId (الأهم — تنسيق MongoDB ObjectId: 24 hex)
+    merchantId: {
+      length:  merchantId.length,
+      preview: preview(merchantId),
+      // التنسيق الصحيح: 24 حرف hex بالضبط (0-9, a-f)
+      formatValid: /^[a-f0-9]{24}$/i.test(merchantId),
+    },
+
+    // تشخيص msisdn (التنسيق المتوقع: 964 + 10 أرقام = 13 رقم)
+    msisdn: {
+      length:  msisdn.length,
+      preview: preview(msisdn),
+      formatValid: /^964[0-9]{10}$/.test(msisdn),
+    },
+
+    // تشخيص apiKey (مجرد طول — لا preview لأنه سري)
+    apiKey: {
+      length: apiKey.length,
+      // ZainCash secrets عادة bcrypt-like ($2y$10$...) بطول 60
+      looksLikeBcrypt: /^\$2[aby]\$\d{2}\$/.test(apiKey),
+    },
+
     apiUrl:        ZAINCASH.API_URL,
     payUrl:        ZAINCASH.PAY_URL,
     redirectUrl:   ZAINCASH.REDIRECT,
-    missing:       MISSING_CREDS,
+
     pendingOrders: pendingOrders.size,
     paidOrders:    paidOrders.size,
   });
