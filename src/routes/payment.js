@@ -1,6 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const { tokenManager, initTransaction, inquireTransaction, API_URL } = require('../services/zaincashV2');
+const { normalizeIraqiPhone } = require('../utils/phoneFormatter');
 
 const router = express.Router(); // mounted at /api/payment
 
@@ -95,12 +96,12 @@ router.post('/zaincash/init', async (req, res) => {
     const plan = PLANS[planKey];
     if (!plan) return res.status(400).json({ success: false, error: 'خطة غير صحيحة' });
 
-    // ─── Phone validation: V2 يتطلب 9647xxxxxxxxx بالضبط ───
-    const phoneTrimmed = String(phone || '').trim();
-    if (!/^9647\d{9}$/.test(phoneTrimmed)) {
+    // ─── Phone normalization: نقبل أي صيغة عراقية شائعة ونحول لـ 9647xxxxxxxxx ───
+    const normalizedPhone = normalizeIraqiPhone(phone);
+    if (!normalizedPhone) {
       return res.status(400).json({
         success: false,
-        error: 'رقم الهاتف مطلوب بصيغة 9647xxxxxxxxx',
+        error: 'رقم الهاتف غير صحيح. تأكد من الصيغة: 07XXXXXXXXX',
       });
     }
 
@@ -117,7 +118,7 @@ router.post('/zaincash/init', async (req, res) => {
       externalReferenceId,
       amount:        plan.price,
       serviceType:   `${ZAINCASH.SERVICE} ${plan.name}`,
-      customerPhone: phoneTrimmed,
+      customerPhone: normalizedPhone,
       language:      'ar',
       successUrl, failureUrl, cancelUrl,
     });
@@ -146,7 +147,7 @@ router.post('/zaincash/init', async (req, res) => {
       planName: plan.name,
       plan,
       name,
-      phone: phoneTrimmed,
+      phone: normalizedPhone,
       email,
       externalReferenceId,
       transactionId,
