@@ -56,8 +56,8 @@ if (!IS_CONFIGURED) {
 
 const PLANS = {
   free_trial: { id: 'free_trial',  name: 'تجربة مجانية', price: 0,      days: 30 },
-  monthly:    { id: 'monthly_pro', name: 'شهري',           price: 65000,  days: 30  },
-  yearly:     { id: 'premium',     name: 'سنوي',           price: 325000, days: 365 },
+  monthly:    { id: 'monthly_pro', name: 'شهري',           price: 25000,  days: 30  },
+  yearly:     { id: 'premium',     name: 'سنوي',           price: 130000, days: 365 },
 };
 
 // ════════════════════════════════════════════════
