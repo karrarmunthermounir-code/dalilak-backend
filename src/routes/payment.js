@@ -170,20 +170,56 @@ router.post('/zaincash/init', async (req, res) => {
     const failureUrl = `${ZAINCASH.CALLBACK_BASE}?status=failed&orderId=${encodeURIComponent(orderId)}`;
     const cancelUrl  = `${ZAINCASH.CALLBACK_BASE}?status=cancelled&orderId=${encodeURIComponent(orderId)}`;
 
-    const initData = await initTransaction({
-      orderId,
-      externalReferenceId,
-      amount:        plan.price,
-      serviceType:   `${ZAINCASH.SERVICE} ${plan.name}`,
-      customerPhone: normalizedPhone,
-      language:      'ar',
-      successUrl, failureUrl, cancelUrl,
-    });
+    // ─── Guard: المستخدم لا يدفع من نفس رقم التاجر ───
+    // ZainCash يرفض ذلك بـ ZC-30710 ("حدث خطأ ما") بدون توضيح
+    if (normalizedPhone === ZAINCASH.MSISDN) {
+      console.warn(`[ZC-V2] init rejected — customer phone equals merchant MSISDN: ${normalizedPhone}`);
+      return res.status(400).json({
+        success: false,
+        error: 'لا يمكنك الدفع باستخدام رقم محفظة التاجر. استخدم رقم محفظتك الشخصية في ZainCash.',
+      });
+    }
 
-    // ─── Recursive search: find ANY https URL or ID in the response,
-    //     regardless of nesting or field name. ZainCash V2 شكل response
-    //     قد يستخدم data.* / result.* / transaction.* / url / link / paymentLink…
-    const payUrl       = findFirstUrl(initData);
+    let initData;
+    try {
+      initData = await initTransaction({
+        orderId,
+        externalReferenceId,
+        amount:        plan.price,
+        serviceType:   `${ZAINCASH.SERVICE} ${plan.name}`,
+        customerPhone: normalizedPhone,
+        language:      'ar',
+        successUrl, failureUrl, cancelUrl,
+      });
+    } catch (err) {
+      // 4xx/5xx من ZainCash — رفع طبيعي
+      throw err;
+    }
+
+    // ─── ZainCash V2 quirk: يُرجِع 200 OK مع envelope `{err: {msg}, redirectUrl:null}`
+    //     لما يرفض المعاملة (مثل ZC-30710). نكشف ذلك صراحةً.
+    if (initData && initData.err) {
+      const zcMsg  = initData.err.msg || initData.err.message || JSON.stringify(initData.err);
+      const zcCode = (zcMsg.match(/ZC-\d+/) || [])[0] || null;
+      console.error(`[ZC-V2] ZainCash rejected: code=${zcCode || 'unknown'} msg="${zcMsg}"`);
+
+      // ترجمة أكواد شائعة لرسائل واضحة للمستخدم النهائي
+      let friendly = `ZainCash رفض المعاملة: ${zcMsg}`;
+      if (zcCode === 'ZC-30710') {
+        friendly = 'فشل إنشاء المعاملة. تأكد من أن رقم محفظتك مفعّل في ZainCash، وأن لديك رصيد كافٍ، وأنه ليس نفس رقم التاجر.';
+      }
+
+      return res.status(502).json({
+        success: false,
+        error: friendly,
+        _zaincashCode: zcCode,
+        _zaincashMsg: zcMsg,
+      });
+    }
+
+    // ─── Recursive search: find ANY https URL or ID in the response،
+    //     regardless of nesting or field name (data.* / result.* / transaction.* …)
+    const payUrl        = findFirstUrl(initData);
     const transactionId = findFirstId(initData);
 
     if (!payUrl) {
@@ -192,7 +228,6 @@ router.post('/zaincash/init', async (req, res) => {
       return res.status(502).json({
         success: false,
         error:   'استجابة ZainCash لا تحتوي على رابط الدفع',
-        // diagnostic — يظهر في APK ليمكن للمستخدم نسخ الـ response الحقيقي
         _raw:    initData,
         _keys:   Object.keys(initData || {}),
       });
