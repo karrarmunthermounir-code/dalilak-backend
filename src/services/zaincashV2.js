@@ -113,7 +113,8 @@ async function initTransaction({
     cancelUrl,
   };
 
-  console.log(`[ZC-V2] init → ${url} order=${orderId} amount=${amount} phone=${customerPhone}`);
+  console.log(`[ZC-V2] init → ${url} order=${orderId} amount=${amount} currency=IQD phone=${customerPhone}`);
+  console.log(`[ZC-V2] init REQUEST BODY: ${JSON.stringify(body)}`);
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -124,16 +125,18 @@ async function initTransaction({
   });
 
   const text = await res.text();
+  // ─── DIAG: print full body always (no slice) so we can see exact V2 shape ───
+  console.log(`[ZC-V2] init RAW status=${res.status} body=${text}`);
   if (!res.ok) {
-    console.error(`[ZC-V2] init failed status=${res.status} body=${text.slice(0, 500)}`);
-    throw new Error(`Init failed (${res.status}): ${text.slice(0, 300)}`);
+    console.error(`[ZC-V2] init failed status=${res.status}`);
+    throw new Error(`Init failed (${res.status}): ${text.slice(0, 500)}`);
   }
 
   let data;
   try { data = JSON.parse(text); }
   catch { throw new Error(`Init returned non-JSON: ${text.slice(0, 200)}`); }
 
-  console.log(`[ZC-V2] init ok response=${JSON.stringify(data).slice(0, 300)}`);
+  console.log(`[ZC-V2] init parsed keys=[${Object.keys(data).join(',')}]`);
   return data;
 }
 

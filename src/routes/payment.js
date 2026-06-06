@@ -60,6 +60,63 @@ const PLANS = {
   yearly:     { id: 'premium',     name: 'سنوي',           price: 325000, days: 365 },
 };
 
+// ════════════════════════════════════════════════
+// Recursive response walkers — يجدون payUrl/transactionId مهما كان
+// اسم الحقل أو موقعه في الـ response (data.*, result.*, transaction.*, …)
+// ════════════════════════════════════════════════
+const URL_KEY_PREFER = [
+  'redirectUrl', 'redirectURL', 'redirect_url',
+  'paymentUrl',  'paymentURL',  'payment_url',
+  'payUrl',      'payURL',
+  'gatewayUrl',  'checkoutUrl', 'paymentLink',
+  'url',         'link',
+];
+const ID_KEY_PREFER = [
+  'transactionId', 'transaction_id', 'txId', 'tx_id',
+  'paymentId',     'payment_id',
+  'referenceId',   'reference_id',
+  'id', '_id',
+];
+
+function findFirstUrl(obj, depth = 0) {
+  if (depth > 6 || obj == null) return null;
+  if (typeof obj === 'string') {
+    return /^https?:\/\//i.test(obj) ? obj : null;
+  }
+  if (typeof obj !== 'object') return null;
+  // 1) فحص الأسماء المفضّلة على هذا المستوى
+  for (const k of URL_KEY_PREFER) {
+    const v = obj[k];
+    if (typeof v === 'string' && /^https?:\/\//i.test(v)) return v;
+  }
+  // 2) walk children
+  for (const v of Object.values(obj)) {
+    const found = findFirstUrl(v, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findFirstId(obj, depth = 0) {
+  if (depth > 6 || obj == null || typeof obj !== 'object') return null;
+  // 1) المفضّلة أولاً
+  for (const k of ID_KEY_PREFER) {
+    const v = obj[k];
+    if (v != null && (typeof v === 'string' || typeof v === 'number')) {
+      const s = String(v);
+      if (s.length > 0) return s;
+    }
+  }
+  // 2) walk children
+  for (const v of Object.values(obj)) {
+    if (typeof v === 'object' && v !== null) {
+      const found = findFirstId(v, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 // ─── مخازن مؤقتة للطلبات (يمكن استبدالها بـ MongoDB لاحقاً) ───
 const pendingOrders = new Map();
 // ─── طلبات مدفوعة بانتظار التفعيل (ينتقل إليها الـ orderId بعد نجاح ZainCash callback) ───
@@ -123,22 +180,22 @@ router.post('/zaincash/init', async (req, res) => {
       successUrl, failureUrl, cancelUrl,
     });
 
-    // ─── Defensive response parsing (V2 field names not fully locked) ───
-    const payUrl =
-      initData.redirectUrl ||
-      initData.paymentUrl  ||
-      initData.payUrl      ||
-      (initData.transactionId ? `${ZAINCASH.API_URL}/pay?id=${initData.transactionId}` : null);
-
-    const transactionId =
-      initData.transactionId ||
-      initData.id            ||
-      initData.transaction?.id ||
-      null;
+    // ─── Recursive search: find ANY https URL or ID in the response,
+    //     regardless of nesting or field name. ZainCash V2 شكل response
+    //     قد يستخدم data.* / result.* / transaction.* / url / link / paymentLink…
+    const payUrl       = findFirstUrl(initData);
+    const transactionId = findFirstId(initData);
 
     if (!payUrl) {
-      console.error('[ZC-V2] init response missing payUrl:', initData);
-      throw new Error('استجابة ZainCash لا تحتوي على رابط الدفع');
+      console.error('[ZC-V2] init response missing payUrl. Full response:');
+      console.error(JSON.stringify(initData, null, 2));
+      return res.status(502).json({
+        success: false,
+        error:   'استجابة ZainCash لا تحتوي على رابط الدفع',
+        // diagnostic — يظهر في APK ليمكن للمستخدم نسخ الـ response الحقيقي
+        _raw:    initData,
+        _keys:   Object.keys(initData || {}),
+      });
     }
 
     pendingOrders.set(orderId, {
