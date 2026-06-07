@@ -221,12 +221,14 @@ const register = async (req, res) => {
             success: false,
             message: 'تعذّر إرسال رمز التأكيد، حاول لاحقاً',
             // ─── diagnostic (لا يكشف credentials) ───
-            errorCode: mailErr.code || null,
-            errorHint: mailErr.code === 'EAUTH'         ? 'بيانات اعتماد البريد خاطئة'
-                     : mailErr.code === 'ETIMEDOUT'     ? 'انتهت مهلة الاتصال (port محجوب)'
-                     : mailErr.code === 'ECONNECTION'   ? 'تعذّر الاتصال بخادم البريد'
-                     : mailErr.code === 'RESEND_ERROR'  ? 'فشل Resend API — تحقق من المفتاح / from domain'
-                     : mailErr.code === 'NO_API_KEY'    ? 'RESEND_API_KEY غير مضبوط'
+            errorCode:    mailErr.code || null,
+            errorMessage: mailErr.message || null,
+            errorHint: mailErr.code === 'EAUTH'              ? 'بيانات اعتماد البريد خاطئة'
+                     : mailErr.code === 'ETIMEDOUT'          ? 'انتهت مهلة الاتصال (port محجوب)'
+                     : mailErr.code === 'ECONNECTION'        ? 'تعذّر الاتصال بخادم البريد'
+                     : mailErr.code === 'validation_error'   ? 'Resend في وضع التجربة: تستطيع الإرسال فقط لإيميل حساب Resend. تحقّق من custom domain.'
+                     : mailErr.code === 'RESEND_ERROR'       ? 'فشل Resend API — تحقق من المفتاح / from domain'
+                     : mailErr.code === 'NO_API_KEY'         ? 'RESEND_API_KEY غير مضبوط'
                      : null,
           });
         }
@@ -465,8 +467,13 @@ const resendOtp = async (req, res) => {
         await sendVerificationEmail(id, user.name, otp);
         console.log(`📧 Verification OTP RESENT to: ${id}`);
       } catch (mailErr) {
-        console.error('sendVerificationEmail error:', mailErr);
-        return res.status(500).json({ success: false, message: 'تعذّر إرسال الرمز، حاول لاحقاً' });
+        console.error('sendVerificationEmail error:', mailErr.code, '-', mailErr.message);
+        return res.status(500).json({
+          success: false,
+          message: 'تعذّر إرسال الرمز، حاول لاحقاً',
+          errorCode:    mailErr.code || null,
+          errorMessage: mailErr.message || null,
+        });
       }
 
       return res.json({ success: true, message: 'تم إرسال رمز جديد', secondsUntilNextResend: 60 });
