@@ -2,7 +2,7 @@ const User     = require('../models/User');
 const Place    = require('../models/Place');
 const { generateToken } = require('../middleware/auth');
 const mongoose = require('mongoose');
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const bcrypt   = require('bcryptjs');
 // ─── للتحقق من الدفع قبل تفعيل الاشتراك ───
 const paymentRouter = require('../routes/payment');
@@ -15,62 +15,51 @@ const otpStore = new Map(); // key: identifier, value: { code, expiresAt, attemp
 
 const isMongoConnected = () => mongoose.connection.readyState === 1;
 
-// ─── إعداد Nodemailer (cached) ───
-// ⚠️ Render Free يحجب port 25/587 → نستخدم port 465 (SMTPS) مع secure:true
-let _cachedTransporter = null;
-let _cachedTransporterReady = null; // null=unknown, true=verified, false=failed
-const createTransporter = () => {
-  if (_cachedTransporter) return _cachedTransporter;
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) return null;
-
-  _cachedTransporter = nodemailer.createTransport({
-    host:   process.env.EMAIL_HOST || 'smtp.gmail.com',
-    port:   parseInt(process.env.EMAIL_PORT, 10) || 465,
-    secure: process.env.EMAIL_SECURE ? process.env.EMAIL_SECURE === 'true' : true,
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
-    },
-    tls: { rejectUnauthorized: false },
-  });
-
-  // ─── تحقق من الاتصال مرة واحدة عند الإنشاء ───
-  _cachedTransporter.verify((error) => {
-    if (error) {
-      _cachedTransporterReady = { ok: false, code: error.code, message: error.message };
-      console.error('[Email Transporter] Failed:', error.code, '-', error.message || error);
-    } else {
-      _cachedTransporterReady = { ok: true };
-      console.log(`[Email Transporter] Ready — host=${process.env.EMAIL_HOST || 'smtp.gmail.com'} port=${process.env.EMAIL_PORT || 465} secure=${process.env.EMAIL_SECURE || 'true'}`);
-    }
-  });
-
-  return _cachedTransporter;
+// ─── إعداد Resend (HTTP API — يعمل على Render Free بدون SMTP) ───
+let _resendClient = null;
+let _resendReady  = null; // null=unknown, { ok:true }, { ok:false, code, message }
+const getResendClient = () => {
+  if (_resendClient) return _resendClient;
+  if (!process.env.RESEND_API_KEY) {
+    _resendReady = { ok: false, code: 'NO_API_KEY', message: 'RESEND_API_KEY not set' };
+    console.warn('[Resend] RESEND_API_KEY not set — emails disabled (will log to console)');
+    return null;
+  }
+  _resendClient = new Resend(process.env.RESEND_API_KEY);
+  _resendReady  = { ok: true };
+  console.log(`[Resend] Initialized — from=${process.env.EMAIL_FROM || 'onboarding@resend.dev'}`);
+  return _resendClient;
 };
 
-// ─── إنشاء الـ transporter مسبقاً عند بدء الـ server (لتظهر "Ready" في logs فوراً) ───
-createTransporter();
+// ─── تفعيل العميل عند بدء السيرفر (لتظهر السطر في logs فوراً) ───
+getResendClient();
 
-// ─── diagnostic export: حالة الـ transporter للـ /api/auth/email-status ───
+// ─── diagnostic: حالة الإيميل للـ /api/auth/email-status ───
 const getEmailTransporterStatus = () => ({
-  configured: !!(process.env.EMAIL_USER && process.env.EMAIL_PASS),
-  host:       process.env.EMAIL_HOST   || 'smtp.gmail.com',
-  port:       parseInt(process.env.EMAIL_PORT, 10) || 465,
-  secure:     process.env.EMAIL_SECURE ? process.env.EMAIL_SECURE === 'true' : true,
-  user:       process.env.EMAIL_USER ? process.env.EMAIL_USER.replace(/^(.).*(@.*)$/, '$1***$2') : null,
-  ready:      _cachedTransporterReady,
+  provider:   'resend',
+  configured: !!process.env.RESEND_API_KEY,
+  from:       process.env.EMAIL_FROM || 'onboarding@resend.dev',
+  ready:      _resendReady,
 });
 
-// ─── إرسال OTP بالإيميل ───
-const sendOtpEmail = async (email, otp) => {
-  const transporter = createTransporter();
-  if (!transporter) {
-    // وضع التطوير — اطبع في الـ console
-    console.log(`\n🔑 [OTP DEMO] البريد: ${email} — الكود: ${otp} — (10 دقائق)\n`);
-    return;
+// ─── helper: إرسال عبر Resend مع رمي خطأ موحّد ───
+const _sendViaResend = async ({ to, subject, html }) => {
+  const resend = getResendClient();
+  if (!resend) return { sent: false, demo: true };
+  const from = process.env.EMAIL_FROM || 'onboarding@resend.dev';
+  const { data, error } = await resend.emails.send({ from, to, subject, html });
+  if (error) {
+    const err = new Error(error.message || 'Resend send failed');
+    err.code = error.name || 'RESEND_ERROR';
+    err.statusCode = error.statusCode;
+    throw err;
   }
-  await transporter.sendMail({
-    from: `"دليلك" <${process.env.EMAIL_USER}>`,
+  return { sent: true, id: data?.id };
+};
+
+// ─── إرسال OTP بالإيميل (إعادة تعيين كلمة المرور) ───
+const sendOtpEmail = async (email, otp) => {
+  const result = await _sendViaResend({
     to: email,
     subject: '🔑 كود إعادة تعيين كلمة المرور — دليلك',
     html: `
@@ -87,18 +76,18 @@ const sendOtpEmail = async (email, otp) => {
         <p style="text-align:center;color:#5a7a68;font-size:12px;">دليلك — تطبيق الأماكن العراقي</p>
       </div>
     `,
-  });
+  }).catch((err) => { throw err; });
+
+  if (result.demo) {
+    console.log(`\n🔑 [OTP DEMO] البريد: ${email} — الكود: ${otp} — (10 دقائق)\n`);
+  } else {
+    console.log(`📧 [Resend] reset OTP sent to ${email} (id=${result.id})`);
+  }
 };
 
 // ─── إرسال OTP تأكيد الحساب الجديد ───
 const sendVerificationEmail = async (email, name, otp) => {
-  const transporter = createTransporter();
-  if (!transporter) {
-    console.log(`\n🔐 [VERIFY OTP DEMO] ${name} <${email}> — الكود: ${otp} — (10 دقائق)\n`);
-    return;
-  }
-  await transporter.sendMail({
-    from: `"دليلك" <${process.env.EMAIL_USER}>`,
+  const result = await _sendViaResend({
     to: email,
     subject: '🔐 رمز تفعيل حسابك في دليلك',
     html: `
@@ -133,7 +122,13 @@ const sendVerificationEmail = async (email, name, otp) => {
         </p>
       </div>
     `,
-  });
+  }).catch((err) => { throw err; });
+
+  if (result.demo) {
+    console.log(`\n🔐 [VERIFY OTP DEMO] ${name} <${email}> — الكود: ${otp} — (10 دقائق)\n`);
+  } else {
+    console.log(`📧 [Resend] verification OTP sent to ${email} (id=${result.id})`);
+  }
 };
 
 // ─── توليد OTP ───
@@ -227,9 +222,11 @@ const register = async (req, res) => {
             message: 'تعذّر إرسال رمز التأكيد، حاول لاحقاً',
             // ─── diagnostic (لا يكشف credentials) ───
             errorCode: mailErr.code || null,
-            errorHint: mailErr.code === 'EAUTH'      ? 'بيانات اعتماد البريد خاطئة (تأكد من App Password)'
-                     : mailErr.code === 'ETIMEDOUT'  ? 'انتهت مهلة الاتصال (port محجوب)'
-                     : mailErr.code === 'ECONNECTION'? 'تعذّر الاتصال بخادم البريد'
+            errorHint: mailErr.code === 'EAUTH'         ? 'بيانات اعتماد البريد خاطئة'
+                     : mailErr.code === 'ETIMEDOUT'     ? 'انتهت مهلة الاتصال (port محجوب)'
+                     : mailErr.code === 'ECONNECTION'   ? 'تعذّر الاتصال بخادم البريد'
+                     : mailErr.code === 'RESEND_ERROR'  ? 'فشل Resend API — تحقق من المفتاح / from domain'
+                     : mailErr.code === 'NO_API_KEY'    ? 'RESEND_API_KEY غير مضبوط'
                      : null,
           });
         }

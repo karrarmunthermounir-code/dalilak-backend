@@ -1,35 +1,22 @@
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 
-let transporter = null;
-const getTransporter = () => {
-  if (transporter) return transporter;
-  if (!process.env.ADMIN_EMAIL || !process.env.ADMIN_EMAIL_PASS) {
-    console.warn('⚠️ ADMIN_EMAIL/ADMIN_EMAIL_PASS not set — admin emails disabled');
+let _resend = null;
+const getResend = () => {
+  if (_resend) return _resend;
+  if (!process.env.RESEND_API_KEY) {
+    console.warn('⚠️ RESEND_API_KEY not set — admin emails disabled');
     return null;
   }
-  // ⚠️ Render Free يحجب port 25/587 → port 465 مع secure:true
-  transporter = nodemailer.createTransport({
-    host:   process.env.EMAIL_HOST || 'smtp.gmail.com',
-    port:   parseInt(process.env.EMAIL_PORT, 10) || 465,
-    secure: process.env.EMAIL_SECURE ? process.env.EMAIL_SECURE === 'true' : true,
-    auth: {
-      user: process.env.ADMIN_EMAIL,
-      pass: process.env.ADMIN_EMAIL_PASS,
-    },
-    tls: { rejectUnauthorized: false },
-  });
-  transporter.verify((error) => {
-    if (error) console.error('[Admin Email Transporter] Failed:', error.message || error);
-    else console.log('[Admin Email Transporter] Ready');
-  });
-  return transporter;
+  _resend = new Resend(process.env.RESEND_API_KEY);
+  return _resend;
 };
 
 async function sendAdminEmail(data) {
-  const t = getTransporter();
-  if (!t) return;
+  const r = getResend();
+  if (!r) return;
 
   const adminEmail = process.env.ADMIN_EMAIL || 'karrar.munther.mounir@gmail.com';
+  const from       = process.env.EMAIL_FROM  || 'onboarding@resend.dev';
 
   const html = `
     <div dir="rtl" style="font-family: Arial; padding: 20px;">
@@ -47,15 +34,16 @@ async function sendAdminEmail(data) {
   `;
 
   try {
-    await t.sendMail({
-      from: process.env.ADMIN_EMAIL,
+    const { data: sent, error } = await r.emails.send({
+      from,
       to: adminEmail,
       subject: `🏪 مكان جديد للمراجعة: ${data.placeName}`,
       html,
     });
-    console.log('✅ Admin notification sent');
+    if (error) throw new Error(error.message || 'Resend send failed');
+    console.log(`✅ Admin notification sent (id=${sent?.id})`);
   } catch (err) {
-    console.error('Email send failed:', err.message);
+    console.error('Resend admin email failed:', err.message);
   }
 }
 
