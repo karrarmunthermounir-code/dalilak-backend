@@ -174,20 +174,28 @@ function sanitizeUser(user) {
 }
 
 // ─── تسجيل مستخدم جديد ───
-// 🔐 إيميل → isVerified:false + إرسال OTP، لا يُرجَع token
-// 📱 هاتف   → isVerified:true (SMS OTP غير مفعّل بعد)، يُرجَع token مباشرة
+// 🔐 إيميل فقط → isVerified:false + إرسال OTP، لا يُرجَع token
+// (التسجيل بالموبايل ملغى منذ v5.3 — الـ login لا يزال يقبل أرقام قديمة للمستخدمين السابقين)
 const register = async (req, res) => {
   try {
     const { name, identifier, password, role } = req.body;
 
     if (!name || !identifier || !password)
-      return res.status(400).json({ success: false, message: 'الاسم والمعرّف وكلمة المرور مطلوبة' });
+      return res.status(400).json({ success: false, message: 'الاسم والإيميل وكلمة المرور مطلوبة' });
 
     if (password.length < 6)
       return res.status(400).json({ success: false, message: 'كلمة المرور 6 أحرف على الأقل' });
 
     const idTrim = identifier.trim();
-    const isEmail = isEmailIdentifier(idTrim);
+
+    // ─── 📧 التسجيل بالإيميل فقط ───
+    if (!isEmailIdentifier(idTrim)) {
+      return res.status(400).json({
+        success: false,
+        message: 'التسجيل بالإيميل فقط حالياً',
+      });
+    }
+    const isEmail = true; // محفوظ لتقليل تعديل الكود اللاحق
 
     let userId, userObj;
 

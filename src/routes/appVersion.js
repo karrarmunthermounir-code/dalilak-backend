@@ -4,20 +4,20 @@ const router = express.Router();
 // قائمة الإصدارات (يمكن نقلها لـ MongoDB لاحقاً)
 const APP_VERSIONS = {
   latest: {
-    versionCode: 7,
-    versionName: '5.2',
-    releaseDate: '2026-06-07',
-    downloadUrl: 'https://files.catbox.moe/zaels8.apk',
+    versionCode: 8,
+    versionName: '5.3',
+    releaseDate: '2026-06-08',
+    downloadUrl: 'https://files.catbox.moe/bgchuw.apk',
     isForceUpdate: false,
     minSupportedVersionCode: 1,
 
     features: [
-      '🔐 نظام تأكيد البريد الإلكتروني',
-      '🗑️ تحسينات في واجهة الاشتراكات',
+      '📧 تسجيل بالإيميل فقط (أبسط وأسرع)',
+      '🎨 تحسين واجهة المصادقة',
       '🐛 إصلاحات أخرى',
     ],
 
-    notes: 'تحديث أمني: تفعيل الحساب الجديد عبر رمز يصل إلى بريدك',
+    notes: 'واجهة تسجيل أنظف — البريد الإلكتروني فقط',
   },
 };
 
