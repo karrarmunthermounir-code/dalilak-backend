@@ -15,16 +15,41 @@ const otpStore = new Map(); // key: identifier, value: { code, expiresAt, attemp
 
 const isMongoConnected = () => mongoose.connection.readyState === 1;
 
-// ─── إعداد Nodemailer ───
+// ─── إعداد Nodemailer (cached) ───
+// ⚠️ Render Free يحجب port 25/587 → نستخدم port 465 (SMTPS) مع secure:true
+let _cachedTransporter = null;
+let _cachedTransporterReady = null; // null=unknown, true=verified, false=failed
 const createTransporter = () => {
-  if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-    return nodemailer.createTransport({
-      service: process.env.EMAIL_SERVICE || 'gmail',
-      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-    });
-  }
-  return null;
+  if (_cachedTransporter) return _cachedTransporter;
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) return null;
+
+  _cachedTransporter = nodemailer.createTransport({
+    host:   process.env.EMAIL_HOST || 'smtp.gmail.com',
+    port:   parseInt(process.env.EMAIL_PORT, 10) || 465,
+    secure: process.env.EMAIL_SECURE ? process.env.EMAIL_SECURE === 'true' : true,
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
+    tls: { rejectUnauthorized: false },
+  });
+
+  // ─── تحقق من الاتصال مرة واحدة عند الإنشاء ───
+  _cachedTransporter.verify((error) => {
+    if (error) {
+      _cachedTransporterReady = false;
+      console.error('[Email Transporter] Failed:', error.message || error);
+    } else {
+      _cachedTransporterReady = true;
+      console.log(`[Email Transporter] Ready — host=${process.env.EMAIL_HOST || 'smtp.gmail.com'} port=${process.env.EMAIL_PORT || 465} secure=${process.env.EMAIL_SECURE || 'true'}`);
+    }
+  });
+
+  return _cachedTransporter;
 };
+
+// ─── إنشاء الـ transporter مسبقاً عند بدء الـ server (لتظهر "Ready" في logs فوراً) ───
+createTransporter();
 
 // ─── إرسال OTP بالإيميل ───
 const sendOtpEmail = async (email, otp) => {

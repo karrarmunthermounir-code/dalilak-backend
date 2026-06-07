@@ -7,12 +7,20 @@ const getTransporter = () => {
     console.warn('⚠️ ADMIN_EMAIL/ADMIN_EMAIL_PASS not set — admin emails disabled');
     return null;
   }
+  // ⚠️ Render Free يحجب port 25/587 → port 465 مع secure:true
   transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host:   process.env.EMAIL_HOST || 'smtp.gmail.com',
+    port:   parseInt(process.env.EMAIL_PORT, 10) || 465,
+    secure: process.env.EMAIL_SECURE ? process.env.EMAIL_SECURE === 'true' : true,
     auth: {
       user: process.env.ADMIN_EMAIL,
       pass: process.env.ADMIN_EMAIL_PASS,
     },
+    tls: { rejectUnauthorized: false },
+  });
+  transporter.verify((error) => {
+    if (error) console.error('[Admin Email Transporter] Failed:', error.message || error);
+    else console.log('[Admin Email Transporter] Ready');
   });
   return transporter;
 };
