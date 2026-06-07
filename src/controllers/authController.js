@@ -37,10 +37,10 @@ const createTransporter = () => {
   // ─── تحقق من الاتصال مرة واحدة عند الإنشاء ───
   _cachedTransporter.verify((error) => {
     if (error) {
-      _cachedTransporterReady = false;
-      console.error('[Email Transporter] Failed:', error.message || error);
+      _cachedTransporterReady = { ok: false, code: error.code, message: error.message };
+      console.error('[Email Transporter] Failed:', error.code, '-', error.message || error);
     } else {
-      _cachedTransporterReady = true;
+      _cachedTransporterReady = { ok: true };
       console.log(`[Email Transporter] Ready — host=${process.env.EMAIL_HOST || 'smtp.gmail.com'} port=${process.env.EMAIL_PORT || 465} secure=${process.env.EMAIL_SECURE || 'true'}`);
     }
   });
@@ -50,6 +50,16 @@ const createTransporter = () => {
 
 // ─── إنشاء الـ transporter مسبقاً عند بدء الـ server (لتظهر "Ready" في logs فوراً) ───
 createTransporter();
+
+// ─── diagnostic export: حالة الـ transporter للـ /api/auth/email-status ───
+const getEmailTransporterStatus = () => ({
+  configured: !!(process.env.EMAIL_USER && process.env.EMAIL_PASS),
+  host:       process.env.EMAIL_HOST   || 'smtp.gmail.com',
+  port:       parseInt(process.env.EMAIL_PORT, 10) || 465,
+  secure:     process.env.EMAIL_SECURE ? process.env.EMAIL_SECURE === 'true' : true,
+  user:       process.env.EMAIL_USER ? process.env.EMAIL_USER.replace(/^(.).*(@.*)$/, '$1***$2') : null,
+  ready:      _cachedTransporterReady,
+});
 
 // ─── إرسال OTP بالإيميل ───
 const sendOtpEmail = async (email, otp) => {
@@ -211,8 +221,17 @@ const register = async (req, res) => {
         } catch (mailErr) {
           // فشل إرسال الإيميل → نحذف الحساب لتجنب حساب معلّق
           await User.deleteOne({ _id: user._id });
-          console.error('sendVerificationEmail error:', mailErr);
-          return res.status(500).json({ success: false, message: 'تعذّر إرسال رمز التأكيد، حاول لاحقاً' });
+          console.error('sendVerificationEmail error:', mailErr.code, '-', mailErr.message);
+          return res.status(500).json({
+            success: false,
+            message: 'تعذّر إرسال رمز التأكيد، حاول لاحقاً',
+            // ─── diagnostic (لا يكشف credentials) ───
+            errorCode: mailErr.code || null,
+            errorHint: mailErr.code === 'EAUTH'      ? 'بيانات اعتماد البريد خاطئة (تأكد من App Password)'
+                     : mailErr.code === 'ETIMEDOUT'  ? 'انتهت مهلة الاتصال (port محجوب)'
+                     : mailErr.code === 'ECONNECTION'? 'تعذّر الاتصال بخادم البريد'
+                     : null,
+          });
         }
 
         return res.status(201).json({
@@ -1093,4 +1112,4 @@ const updateSettings = async (req, res) => {
   }
 };
 
-module.exports = { register, login, verifyOtp, resendOtp, getMe, updateProfile, toggleFavorite, activateSubscription, getStats, requestPasswordReset, resetPassword, savePushSubscription, getVapidKey, saveFcmToken, getMyData, updateSettings };
+module.exports = { register, login, verifyOtp, resendOtp, getMe, updateProfile, toggleFavorite, activateSubscription, getStats, requestPasswordReset, resetPassword, savePushSubscription, getVapidKey, saveFcmToken, getMyData, updateSettings, getEmailTransporterStatus };
