@@ -1,7 +1,8 @@
 const express = require('express');
 const router  = express.Router();
 const {
-  register, login, getMe, updateProfile,
+  register, login, verifyOtp, resendOtp,
+  getMe, updateProfile,
   toggleFavorite, activateSubscription, getStats,
   requestPasswordReset, resetPassword,
   savePushSubscription, getVapidKey, saveFcmToken,
@@ -12,7 +13,9 @@ const { protect } = require('../middleware/auth');
 // ─── المسارات العامة ───
 router.post('/register',       register);
 router.post('/login',          login);
-router.post('/forgot-password', requestPasswordReset); // طلب OTP
+router.post('/verify-otp',     verifyOtp);             // تأكيد الحساب الجديد بـ OTP
+router.post('/resend-otp',     resendOtp);             // إعادة إرسال OTP التأكيد
+router.post('/forgot-password', requestPasswordReset); // طلب OTP لإعادة تعيين كلمة المرور
 router.post('/reset-password',  resetPassword);        // تعيين كلمة مرور جديدة
 
 // ─── المسارات المحمية (تتطلب تسجيل الدخول) ───

@@ -55,8 +55,71 @@ const sendOtpEmail = async (email, otp) => {
   });
 };
 
+// ─── إرسال OTP تأكيد الحساب الجديد ───
+const sendVerificationEmail = async (email, name, otp) => {
+  const transporter = createTransporter();
+  if (!transporter) {
+    console.log(`\n🔐 [VERIFY OTP DEMO] ${name} <${email}> — الكود: ${otp} — (10 دقائق)\n`);
+    return;
+  }
+  await transporter.sendMail({
+    from: `"دليلك" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: '🔐 رمز تفعيل حسابك في دليلك',
+    html: `
+      <div style="direction:rtl;font-family:Arial,'Segoe UI',sans-serif;max-width:520px;margin:auto;background:#0d1f17;color:#e8f5ee;border-radius:18px;padding:36px;">
+        <div style="text-align:center;margin-bottom:24px;">
+          <div style="font-size:42px;">🌴</div>
+          <h1 style="color:#5dde8a;margin:8px 0 0;font-size:24px;font-weight:900;">دليلك</h1>
+        </div>
+        <h2 style="color:#e8f5ee;font-size:18px;margin:0 0 6px;">مرحباً ${name || ''} 👋</h2>
+        <p style="color:#bcd6c8;font-size:15px;line-height:1.7;margin:0 0 22px;">
+          شكراً لتسجيلك في دليلك. لإكمال تفعيل حسابك، استخدم رمز التحقق التالي:
+        </p>
+        <div style="background:linear-gradient(135deg,#1a3a28 0%,#0d1f17 100%);border:1px solid rgba(93,222,138,0.25);border-radius:14px;padding:26px;text-align:center;margin:8px 0 24px;">
+          <div style="color:#8aaa96;font-size:12px;letter-spacing:2px;margin-bottom:10px;">رمز التفعيل</div>
+          <span style="font-size:38px;font-weight:900;letter-spacing:12px;color:#c9973a;font-family:'Courier New',monospace;">${otp}</span>
+        </div>
+        <div style="background:rgba(201,151,58,0.08);border-right:3px solid #c9973a;border-radius:8px;padding:12px 16px;margin:0 0 18px;">
+          <p style="color:#e8d4a8;font-size:13px;margin:0;line-height:1.6;">
+            ⏰ صالح لمدة <strong>10 دقائق</strong> فقط<br>
+            🔒 لا تشارك هذا الرمز مع أي شخص — فريق دليلك لن يطلبه منك أبداً
+          </p>
+        </div>
+        <p style="color:#8aaa96;font-size:13px;line-height:1.7;margin:0 0 8px;">
+          إذا لم تقم بإنشاء حساب في دليلك، تجاهل هذه الرسالة.
+        </p>
+        <hr style="border:none;border-top:1px solid rgba(93,222,138,0.12);margin:24px 0 14px;">
+        <p style="text-align:center;color:#5a7a68;font-size:12px;margin:0;">
+          للمساعدة: <a href="mailto:info@dalilak.app" style="color:#5dde8a;text-decoration:none;">info@dalilak.app</a>
+        </p>
+        <p style="text-align:center;color:#3d5a4d;font-size:11px;margin:6px 0 0;">
+          دليلك — تطبيق الأماكن العراقي
+        </p>
+      </div>
+    `,
+  });
+};
+
 // ─── توليد OTP ───
 const generateOTP = () => String(Math.floor(100000 + Math.random() * 900000));
+
+// ─── إخفاء البريد الإلكتروني (k***@gmail.com) ───
+const maskEmail = (email) => {
+  if (!email || !email.includes('@')) return email;
+  const [local, domain] = email.split('@');
+  if (local.length <= 1) return `*@${domain}`;
+  return `${local[0]}${'*'.repeat(Math.max(3, local.length - 1))}@${domain}`;
+};
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const isEmailIdentifier = (val) => EMAIL_RE.test(val);
+
+// ─── الثوابت الزمنية لـ OTP تأكيد الحساب ───
+const OTP_EXPIRES_MS         = 10 * 60 * 1000; // 10 دقائق
+const RESEND_COOLDOWN_MS     = 60 * 1000;       // 60 ثانية بين كل resend
+const MAX_VERIFY_ATTEMPTS    = 5;
+const LOCKOUT_DURATION_MS    = 30 * 60 * 1000;  // 30 دقيقة
 
 // ─── دالة مساعدة لإنشاء user من الذاكرة ───
 function createMemoryUser({ name, identifier, password, role }) {
@@ -81,6 +144,8 @@ function sanitizeUser(user) {
 }
 
 // ─── تسجيل مستخدم جديد ───
+// 🔐 إيميل → isVerified:false + إرسال OTP، لا يُرجَع token
+// 📱 هاتف   → isVerified:true (SMS OTP غير مفعّل بعد)، يُرجَع token مباشرة
 const register = async (req, res) => {
   try {
     const { name, identifier, password, role } = req.body;
@@ -91,16 +156,51 @@ const register = async (req, res) => {
     if (password.length < 6)
       return res.status(400).json({ success: false, message: 'كلمة المرور 6 أحرف على الأقل' });
 
+    const idTrim = identifier.trim();
+    const isEmail = isEmailIdentifier(idTrim);
+
     let userId, userObj;
 
     if (isMongoConnected()) {
-      const exists = await User.findOne({ identifier: identifier.trim() });
+      const exists = await User.findOne({ identifier: idTrim });
       if (exists) return res.status(400).json({ success: false, message: 'هذا الحساب مسجّل مسبقاً' });
 
-      const user = await User.create({
-        name: name.trim(), identifier: identifier.trim(), password,
+      const userData = {
+        name: name.trim(), identifier: idTrim, password,
         role: role || 'user', avatar: name.trim().charAt(0).toUpperCase(),
-      });
+        isVerified: !isEmail, // إيميل → false (يحتاج OTP)، هاتف → true
+      };
+
+      // ─── إيميل: ولّد OTP وأرسله ───
+      if (isEmail) {
+        const otp = generateOTP();
+        userData.verificationOtp        = otp;
+        userData.verificationOtpExpires = new Date(Date.now() + OTP_EXPIRES_MS);
+        userData.verificationLastSentAt = new Date();
+        userData.verificationAttempts   = 0;
+
+        const user = await User.create(userData);
+        try {
+          await sendVerificationEmail(idTrim, user.name, otp);
+          console.log(`📧 Verification OTP sent to: ${idTrim}`);
+        } catch (mailErr) {
+          // فشل إرسال الإيميل → نحذف الحساب لتجنب حساب معلّق
+          await User.deleteOne({ _id: user._id });
+          console.error('sendVerificationEmail error:', mailErr);
+          return res.status(500).json({ success: false, message: 'تعذّر إرسال رمز التأكيد، حاول لاحقاً' });
+        }
+
+        return res.status(201).json({
+          success: true,
+          needsVerification: true,
+          identifier: idTrim,
+          maskedEmail: maskEmail(idTrim),
+          message: 'تم إرسال رمز التأكيد إلى بريدك الإلكتروني',
+        });
+      }
+
+      // ─── هاتف: لا OTP، token مباشرة ───
+      const user = await User.create(userData);
       userId  = user._id;
       userObj = {
         id: user._id, name: user.name, identifier: user.identifier,
@@ -110,10 +210,42 @@ const register = async (req, res) => {
       };
     } else {
       // Fallback: الذاكرة
-      if (memoryUsers.has(identifier.trim()))
+      if (memoryUsers.has(idTrim))
         return res.status(400).json({ success: false, message: 'هذا الحساب مسجّل مسبقاً' });
 
-      const user = createMemoryUser({ name: name.trim(), identifier: identifier.trim(), password, role });
+      const user = createMemoryUser({ name: name.trim(), identifier: idTrim, password, role });
+
+      if (isEmail) {
+        // في وضع الذاكرة (بدون MongoDB)، نخزّن OTP على object المستخدم
+        const otp = generateOTP();
+        user.isVerified              = false;
+        user.verificationOtp         = otp;
+        user.verificationOtpExpires  = Date.now() + OTP_EXPIRES_MS;
+        user.verificationLastSentAt  = Date.now();
+        user.verificationAttempts    = 0;
+        memoryUsers.set(idTrim, user);
+
+        try {
+          await sendVerificationEmail(idTrim, user.name, otp);
+          console.log(`📧 Verification OTP (memory) sent to: ${idTrim}`);
+        } catch (mailErr) {
+          memoryUsers.delete(idTrim);
+          console.error('sendVerificationEmail error:', mailErr);
+          return res.status(500).json({ success: false, message: 'تعذّر إرسال رمز التأكيد، حاول لاحقاً' });
+        }
+
+        return res.status(201).json({
+          success: true,
+          needsVerification: true,
+          identifier: idTrim,
+          maskedEmail: maskEmail(idTrim),
+          message: 'تم إرسال رمز التأكيد إلى بريدك الإلكتروني',
+        });
+      }
+
+      // هاتف في الذاكرة
+      user.isVerified = true;
+      memoryUsers.set(idTrim, user);
       userId  = user.id;
       userObj = sanitizeUser(user);
     }
@@ -122,6 +254,216 @@ const register = async (req, res) => {
     res.status(201).json({ success: true, token, user: userObj });
   } catch (err) {
     console.error('register error:', err);
+    res.status(500).json({ success: false, message: 'خطأ في الخادم' });
+  }
+};
+
+// ─── التحقق من OTP وتفعيل الحساب الجديد ───
+const verifyOtp = async (req, res) => {
+  try {
+    const { identifier, otp } = req.body;
+    if (!identifier || !otp)
+      return res.status(400).json({ success: false, message: 'البريد والرمز مطلوبان' });
+
+    const id = identifier.trim();
+    const code = String(otp).trim();
+
+    if (isMongoConnected()) {
+      const user = await User.findOne({ identifier: id });
+      if (!user) return res.status(404).json({ success: false, message: 'الحساب غير موجود' });
+
+      // إذا الحساب مفعّل أصلاً
+      if (user.isVerified) {
+        return res.status(400).json({ success: false, message: 'الحساب مفعّل مسبقاً، سجّل دخولك' });
+      }
+
+      // تحقق من القفل
+      if (user.verificationLockedUntil && user.verificationLockedUntil > new Date()) {
+        const minutesLeft = Math.ceil((user.verificationLockedUntil - Date.now()) / 60000);
+        return res.status(429).json({
+          success: false,
+          locked: true,
+          message: `الحساب مقفل مؤقتاً، حاول بعد ${minutesLeft} دقيقة`,
+          unlocksAt: user.verificationLockedUntil,
+        });
+      }
+
+      // تحقق من انتهاء صلاحية OTP
+      if (!user.verificationOtp || !user.verificationOtpExpires || user.verificationOtpExpires < new Date()) {
+        return res.status(400).json({
+          success: false,
+          expired: true,
+          message: 'انتهت صلاحية الرمز، اطلب رمزاً جديداً',
+        });
+      }
+
+      // تحقق من تطابق OTP
+      if (user.verificationOtp !== code) {
+        user.verificationAttempts = (user.verificationAttempts || 0) + 1;
+        const attemptsLeft = MAX_VERIFY_ATTEMPTS - user.verificationAttempts;
+
+        if (user.verificationAttempts >= MAX_VERIFY_ATTEMPTS) {
+          user.verificationLockedUntil = new Date(Date.now() + LOCKOUT_DURATION_MS);
+          user.verificationOtp         = null;
+          user.verificationOtpExpires  = null;
+          user.verificationAttempts    = 0;
+          await user.save();
+          return res.status(429).json({
+            success: false,
+            locked: true,
+            message: 'تجاوزت عدد المحاولات، الحساب مقفل 30 دقيقة',
+            unlocksAt: user.verificationLockedUntil,
+          });
+        }
+
+        await user.save();
+        return res.status(400).json({
+          success: false,
+          message: `رمز غير صحيح، تبقى ${attemptsLeft} محاولات`,
+          attemptsLeft,
+        });
+      }
+
+      // ─── النجاح: فعّل الحساب وأصدر token ───
+      user.isVerified              = true;
+      user.verificationOtp         = null;
+      user.verificationOtpExpires  = null;
+      user.verificationAttempts    = 0;
+      user.verificationLockedUntil = null;
+      await user.save();
+
+      const userObj = {
+        id: user._id, name: user.name, identifier: user.identifier,
+        role: user.role, avatar: user.avatar,
+        businessName: user.businessName, businessId: user.businessId,
+        subscription: user.subscription || {}, favorites: user.favorites || [],
+        settings: user.settings || {},
+      };
+      const token = generateToken(user._id);
+      console.log(`✅ Account verified: ${id}`);
+      return res.json({ success: true, token, user: userObj, places: [] });
+    }
+
+    // ─── Fallback: الذاكرة ───
+    const u = memoryUsers.get(id);
+    if (!u) return res.status(404).json({ success: false, message: 'الحساب غير موجود' });
+    if (u.isVerified) return res.status(400).json({ success: false, message: 'الحساب مفعّل مسبقاً، سجّل دخولك' });
+
+    if (u.verificationLockedUntil && u.verificationLockedUntil > Date.now()) {
+      const minutesLeft = Math.ceil((u.verificationLockedUntil - Date.now()) / 60000);
+      return res.status(429).json({ success: false, locked: true, message: `الحساب مقفل، حاول بعد ${minutesLeft} دقيقة` });
+    }
+    if (!u.verificationOtp || !u.verificationOtpExpires || u.verificationOtpExpires < Date.now()) {
+      return res.status(400).json({ success: false, expired: true, message: 'انتهت صلاحية الرمز' });
+    }
+    if (u.verificationOtp !== code) {
+      u.verificationAttempts = (u.verificationAttempts || 0) + 1;
+      const attemptsLeft = MAX_VERIFY_ATTEMPTS - u.verificationAttempts;
+      if (u.verificationAttempts >= MAX_VERIFY_ATTEMPTS) {
+        u.verificationLockedUntil = Date.now() + LOCKOUT_DURATION_MS;
+        u.verificationOtp = null; u.verificationAttempts = 0;
+        memoryUsers.set(id, u);
+        return res.status(429).json({ success: false, locked: true, message: 'تجاوزت المحاولات، الحساب مقفل 30 دقيقة' });
+      }
+      memoryUsers.set(id, u);
+      return res.status(400).json({ success: false, message: `رمز غير صحيح، تبقى ${attemptsLeft} محاولات`, attemptsLeft });
+    }
+
+    u.isVerified = true;
+    u.verificationOtp = null; u.verificationOtpExpires = null;
+    u.verificationAttempts = 0; u.verificationLockedUntil = null;
+    memoryUsers.set(id, u);
+    const token = generateToken(u.id);
+    return res.json({ success: true, token, user: sanitizeUser(u), places: [] });
+  } catch (err) {
+    console.error('verifyOtp error:', err);
+    res.status(500).json({ success: false, message: 'خطأ في الخادم' });
+  }
+};
+
+// ─── إعادة إرسال OTP ───
+const resendOtp = async (req, res) => {
+  try {
+    const { identifier } = req.body;
+    if (!identifier) return res.status(400).json({ success: false, message: 'البريد مطلوب' });
+
+    const id = identifier.trim();
+
+    if (isMongoConnected()) {
+      const user = await User.findOne({ identifier: id });
+      if (!user) return res.status(404).json({ success: false, message: 'الحساب غير موجود' });
+      if (user.isVerified) return res.status(400).json({ success: false, message: 'الحساب مفعّل مسبقاً' });
+
+      // تحقق من القفل
+      if (user.verificationLockedUntil && user.verificationLockedUntil > new Date()) {
+        const minutesLeft = Math.ceil((user.verificationLockedUntil - Date.now()) / 60000);
+        return res.status(429).json({ success: false, locked: true, message: `الحساب مقفل، حاول بعد ${minutesLeft} دقيقة` });
+      }
+
+      // cooldown 60 ثانية
+      if (user.verificationLastSentAt) {
+        const elapsed = Date.now() - new Date(user.verificationLastSentAt).getTime();
+        if (elapsed < RESEND_COOLDOWN_MS) {
+          const secondsUntilNextResend = Math.ceil((RESEND_COOLDOWN_MS - elapsed) / 1000);
+          return res.status(429).json({
+            success: false,
+            message: `انتظر ${secondsUntilNextResend} ثانية قبل إعادة الإرسال`,
+            secondsUntilNextResend,
+          });
+        }
+      }
+
+      const otp = generateOTP();
+      user.verificationOtp        = otp;
+      user.verificationOtpExpires = new Date(Date.now() + OTP_EXPIRES_MS);
+      user.verificationLastSentAt = new Date();
+      user.verificationAttempts   = 0; // resend يصفر المحاولات
+      await user.save();
+
+      try {
+        await sendVerificationEmail(id, user.name, otp);
+        console.log(`📧 Verification OTP RESENT to: ${id}`);
+      } catch (mailErr) {
+        console.error('sendVerificationEmail error:', mailErr);
+        return res.status(500).json({ success: false, message: 'تعذّر إرسال الرمز، حاول لاحقاً' });
+      }
+
+      return res.json({ success: true, message: 'تم إرسال رمز جديد', secondsUntilNextResend: 60 });
+    }
+
+    // ─── Fallback: الذاكرة ───
+    const u = memoryUsers.get(id);
+    if (!u) return res.status(404).json({ success: false, message: 'الحساب غير موجود' });
+    if (u.isVerified) return res.status(400).json({ success: false, message: 'الحساب مفعّل مسبقاً' });
+
+    if (u.verificationLockedUntil && u.verificationLockedUntil > Date.now()) {
+      const minutesLeft = Math.ceil((u.verificationLockedUntil - Date.now()) / 60000);
+      return res.status(429).json({ success: false, locked: true, message: `الحساب مقفل، حاول بعد ${minutesLeft} دقيقة` });
+    }
+    if (u.verificationLastSentAt) {
+      const elapsed = Date.now() - u.verificationLastSentAt;
+      if (elapsed < RESEND_COOLDOWN_MS) {
+        const secondsUntilNextResend = Math.ceil((RESEND_COOLDOWN_MS - elapsed) / 1000);
+        return res.status(429).json({ success: false, message: `انتظر ${secondsUntilNextResend} ثانية`, secondsUntilNextResend });
+      }
+    }
+
+    const otp = generateOTP();
+    u.verificationOtp = otp;
+    u.verificationOtpExpires = Date.now() + OTP_EXPIRES_MS;
+    u.verificationLastSentAt = Date.now();
+    u.verificationAttempts = 0;
+    memoryUsers.set(id, u);
+
+    try {
+      await sendVerificationEmail(id, u.name, otp);
+    } catch (mailErr) {
+      console.error('sendVerificationEmail error:', mailErr);
+      return res.status(500).json({ success: false, message: 'تعذّر إرسال الرمز' });
+    }
+    return res.json({ success: true, message: 'تم إرسال رمز جديد', secondsUntilNextResend: 60 });
+  } catch (err) {
+    console.error('resendOtp error:', err);
     res.status(500).json({ success: false, message: 'خطأ في الخادم' });
   }
 };
@@ -143,6 +485,20 @@ const login = async (req, res) => {
       // ─── مقارنة آمنة بـ bcrypt (تدعم القديمة والجديدة) ───
       const isMatch = await user.comparePassword(password);
       if (!isMatch) return res.status(401).json({ success: false, message: 'كلمة المرور غير صحيحة' });
+
+      // ─── 🔐 رفض الحسابات غير المفعّلة (إيميل بدون تأكيد OTP) ───
+      // ملاحظة: المستخدمون القدامى بدون حقل isVerified يُعاملون كمفعّلين (isVerified === undefined)
+      if (user.isVerified === false) {
+        const id = user.identifier;
+        const isEmail = isEmailIdentifier(id);
+        return res.status(403).json({
+          success: false,
+          needsVerification: true,
+          identifier: id,
+          maskedEmail: isEmail ? maskEmail(id) : id,
+          message: 'حسابك غير مفعّل، تحقق من بريدك الإلكتروني',
+        });
+      }
 
       // ─── ترقية كلمات المرور القديمة (plain text → bcrypt) ───
       if (!user.password.startsWith('$2a$') && !user.password.startsWith('$2b$')) {
@@ -712,4 +1068,4 @@ const updateSettings = async (req, res) => {
   }
 };
 
-module.exports = { register, login, getMe, updateProfile, toggleFavorite, activateSubscription, getStats, requestPasswordReset, resetPassword, savePushSubscription, getVapidKey, saveFcmToken, getMyData, updateSettings };
+module.exports = { register, login, verifyOtp, resendOtp, getMe, updateProfile, toggleFavorite, activateSubscription, getStats, requestPasswordReset, resetPassword, savePushSubscription, getVapidKey, saveFcmToken, getMyData, updateSettings };

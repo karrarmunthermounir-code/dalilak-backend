@@ -42,6 +42,15 @@ const userSchema = new mongoose.Schema({
   settings:    { type: settingsSchema, default: () => ({}) },  // إعدادات دائمة
   pushSubscriptions: [{ type: mongoose.Schema.Types.Mixed }], // اشتراكات Web Push
   fcmTokens:   [{ type: String }], // FCM tokens للإشعارات الحقيقية على Android
+
+  // ─── تأكيد البريد الإلكتروني (OTP) ───
+  // المستخدمون القدامى بدون هذا الحقل = مفعّلون (انظر isVerified !== false في login)
+  isVerified:              { type: Boolean, default: false },
+  verificationOtp:         { type: String, default: null },
+  verificationOtpExpires:  { type: Date,   default: null },
+  verificationAttempts:    { type: Number, default: 0 },
+  verificationLockedUntil: { type: Date,   default: null },
+  verificationLastSentAt:  { type: Date,   default: null },
 }, {
   timestamps: true,
 });

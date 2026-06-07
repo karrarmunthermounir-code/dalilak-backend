@@ -4,22 +4,20 @@ const router = express.Router();
 // قائمة الإصدارات (يمكن نقلها لـ MongoDB لاحقاً)
 const APP_VERSIONS = {
   latest: {
-    versionCode: 6,
-    versionName: '5.1',
-    releaseDate: '2026-06-06',
-    downloadUrl: 'https://files.catbox.moe/7ise6p.apk',
+    versionCode: 7,
+    versionName: '5.2',
+    releaseDate: '2026-06-07',
+    downloadUrl: 'https://files.catbox.moe/zaels8.apk',
     isForceUpdate: false,
     minSupportedVersionCode: 1,
 
     features: [
-      '✨ نظام إشعارات التحديثات',
-      '💰 أسعار جديدة (25K شهري / 130K سنوي)',
-      '🔐 تكامل ZainCash V2 محسّن',
-      '📱 دعم كل صيغ أرقام الهاتف العراقية',
-      '🐛 إصلاحات وتحسينات عامة',
+      '🔐 نظام تأكيد البريد الإلكتروني',
+      '🗑️ تحسينات في واجهة الاشتراكات',
+      '🐛 إصلاحات أخرى',
     ],
 
-    notes: 'تحديث مهم يحسن تجربة الدفع ويضيف إشعارات داخل التطبيق',
+    notes: 'تحديث أمني: تفعيل الحساب الجديد عبر رمز يصل إلى بريدك',
   },
 };
 
