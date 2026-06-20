@@ -7,7 +7,7 @@ const APP_VERSIONS = {
     versionCode: 9,
     versionName: '5.4',
     releaseDate: '2026-06-20',
-    downloadUrl: 'https://files.catbox.moe/bgchuw.apk',
+    downloadUrl: 'https://files.catbox.moe/1paa7x.apk',
     isForceUpdate: false,
     minSupportedVersionCode: 1,
 
