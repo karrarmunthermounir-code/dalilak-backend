@@ -145,6 +145,19 @@ const maskEmail = (email) => {
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const isEmailIdentifier = (val) => EMAIL_RE.test(val);
 
+// ─── تطبيع رقم الموبايل العراقي إلى صيغة 07XXXXXXXXX ───
+// يقبل: 07XXXXXXXXX | +9647XXXXXXXXX | 009647XXXXXXXXX | 7XXXXXXXXX
+// يُرجع null لو الصيغة غير صالحة
+const normalizeIraqiPhone = (val) => {
+  if (!val) return null;
+  let s = String(val).trim().replace(/[\s\-()]/g, '');
+  if (s.startsWith('+964'))  s = '0' + s.slice(4);
+  else if (s.startsWith('00964')) s = '0' + s.slice(5);
+  else if (s.startsWith('964'))   s = '0' + s.slice(3);
+  else if (/^7[3-9]\d{8}$/.test(s)) s = '0' + s;
+  return /^07[3-9]\d{8}$/.test(s) ? s : null;
+};
+
 // ─── الثوابت الزمنية لـ OTP تأكيد الحساب ───
 const OTP_EXPIRES_MS         = 10 * 60 * 1000; // 10 دقائق
 const RESEND_COOLDOWN_MS     = 60 * 1000;       // 60 ثانية بين كل resend
@@ -173,139 +186,82 @@ function sanitizeUser(user) {
   return safe;
 }
 
-// ─── تسجيل مستخدم جديد ───
-// 🔐 إيميل فقط → isVerified:false + إرسال OTP، لا يُرجَع token
-// (التسجيل بالموبايل ملغى منذ v5.3 — الـ login لا يزال يقبل أرقام قديمة للمستخدمين السابقين)
+// ─── تسجيل مستخدم جديد (v5.4) ───
+// 🚀 تسجيل مباشر بدون OTP — يقبل إيميل أو رقم موبايل عراقي
+// (نُلغي OTP مؤقتاً للإطلاق التجريبي؛ verify-otp / resend-otp يبقيان للتوافق مع المستخدمين القدامى)
 const register = async (req, res) => {
   try {
     const { name, identifier, password, role } = req.body;
 
     if (!name || !identifier || !password)
-      return res.status(400).json({ success: false, message: 'الاسم والإيميل وكلمة المرور مطلوبة' });
+      return res.status(400).json({ success: false, message: 'الاسم والمعرّف وكلمة المرور مطلوبة' });
 
     if (password.length < 6)
       return res.status(400).json({ success: false, message: 'كلمة المرور 6 أحرف على الأقل' });
 
     const idTrim = identifier.trim();
+    const isEmail = isEmailIdentifier(idTrim);
+    const normalizedPhone = !isEmail ? normalizeIraqiPhone(idTrim) : null;
 
-    // ─── 📧 التسجيل بالإيميل فقط ───
-    if (!isEmailIdentifier(idTrim)) {
+    if (!isEmail && !normalizedPhone) {
       return res.status(400).json({
         success: false,
-        message: 'التسجيل بالإيميل فقط حالياً',
+        message: 'أدخل بريداً إلكترونياً صحيحاً أو رقم موبايل عراقي (07XXXXXXXXX)',
       });
     }
-    const isEmail = true; // محفوظ لتقليل تعديل الكود اللاحق
+
+    // ─── المعرّف النهائي: إيميل lowercase أو رقم مُطبَّع ───
+    const idFinal = isEmail ? idTrim.toLowerCase() : normalizedPhone;
 
     let userId, userObj;
 
     if (isMongoConnected()) {
-      const exists = await User.findOne({ identifier: idTrim });
-      if (exists) return res.status(400).json({ success: false, message: 'هذا الحساب مسجّل مسبقاً' });
-
-      const userData = {
-        name: name.trim(), identifier: idTrim, password,
-        role: role || 'user', avatar: name.trim().charAt(0).toUpperCase(),
-        isVerified: !isEmail, // إيميل → false (يحتاج OTP)، هاتف → true
-      };
-
-      // ─── إيميل: ولّد OTP وأرسله ───
-      if (isEmail) {
-        const otp = generateOTP();
-        userData.verificationOtp        = otp;
-        userData.verificationOtpExpires = new Date(Date.now() + OTP_EXPIRES_MS);
-        userData.verificationLastSentAt = new Date();
-        userData.verificationAttempts   = 0;
-
-        const user = await User.create(userData);
-        try {
-          await sendVerificationEmail(idTrim, user.name, otp);
-          console.log(`📧 Verification OTP sent to: ${idTrim}`);
-        } catch (mailErr) {
-          // فشل إرسال الإيميل → نحذف الحساب لتجنب حساب معلّق
-          await User.deleteOne({ _id: user._id });
-          console.error('sendVerificationEmail error:', mailErr.code, '-', mailErr.message);
-          return res.status(500).json({
-            success: false,
-            message: 'تعذّر إرسال رمز التأكيد، حاول لاحقاً',
-            // ─── diagnostic (لا يكشف credentials) ───
-            errorCode:    mailErr.code || null,
-            errorMessage: mailErr.message || null,
-            errorHint: mailErr.code === 'EAUTH'              ? 'بيانات اعتماد البريد خاطئة'
-                     : mailErr.code === 'ETIMEDOUT'          ? 'انتهت مهلة الاتصال (port محجوب)'
-                     : mailErr.code === 'ECONNECTION'        ? 'تعذّر الاتصال بخادم البريد'
-                     : mailErr.code === 'validation_error'   ? 'Resend في وضع التجربة: تستطيع الإرسال فقط لإيميل حساب Resend. تحقّق من custom domain.'
-                     : mailErr.code === 'RESEND_ERROR'       ? 'فشل Resend API — تحقق من المفتاح / from domain'
-                     : mailErr.code === 'NO_API_KEY'         ? 'RESEND_API_KEY غير مضبوط'
-                     : null,
-          });
-        }
-
-        return res.status(201).json({
-          success: true,
-          needsVerification: true,
-          identifier: idTrim,
-          maskedEmail: maskEmail(idTrim),
-          message: 'تم إرسال رمز التأكيد إلى بريدك الإلكتروني',
+      const exists = await User.findOne({ identifier: idFinal });
+      if (exists) {
+        return res.status(400).json({
+          success: false,
+          message: 'هذا الحساب موجود بالفعل، سجّل دخولك',
         });
       }
 
-      // ─── هاتف: لا OTP، token مباشرة ───
-      const user = await User.create(userData);
+      const user = await User.create({
+        name: name.trim(),
+        identifier: idFinal,
+        password,
+        role: role || 'user',
+        avatar: name.trim().charAt(0).toUpperCase(),
+        isVerified: true, // ⚠️ مفعّل تلقائياً (لا OTP)
+      });
+
       userId  = user._id;
       userObj = {
         id: user._id, name: user.name, identifier: user.identifier,
         role: user.role, avatar: user.avatar,
         businessName: user.businessName, businessId: user.businessId,
         subscription: {}, favorites: [],
+        isVerified: true,
       };
     } else {
       // Fallback: الذاكرة
-      if (memoryUsers.has(idTrim))
-        return res.status(400).json({ success: false, message: 'هذا الحساب مسجّل مسبقاً' });
-
-      const user = createMemoryUser({ name: name.trim(), identifier: idTrim, password, role });
-
-      if (isEmail) {
-        // في وضع الذاكرة (بدون MongoDB)، نخزّن OTP على object المستخدم
-        const otp = generateOTP();
-        user.isVerified              = false;
-        user.verificationOtp         = otp;
-        user.verificationOtpExpires  = Date.now() + OTP_EXPIRES_MS;
-        user.verificationLastSentAt  = Date.now();
-        user.verificationAttempts    = 0;
-        memoryUsers.set(idTrim, user);
-
-        try {
-          await sendVerificationEmail(idTrim, user.name, otp);
-          console.log(`📧 Verification OTP (memory) sent to: ${idTrim}`);
-        } catch (mailErr) {
-          memoryUsers.delete(idTrim);
-          console.error('sendVerificationEmail error:', mailErr);
-          return res.status(500).json({ success: false, message: 'تعذّر إرسال رمز التأكيد، حاول لاحقاً' });
-        }
-
-        return res.status(201).json({
-          success: true,
-          needsVerification: true,
-          identifier: idTrim,
-          maskedEmail: maskEmail(idTrim),
-          message: 'تم إرسال رمز التأكيد إلى بريدك الإلكتروني',
+      if (memoryUsers.has(idFinal)) {
+        return res.status(400).json({
+          success: false,
+          message: 'هذا الحساب موجود بالفعل، سجّل دخولك',
         });
       }
 
-      // هاتف في الذاكرة
+      const user = createMemoryUser({ name: name.trim(), identifier: idFinal, password, role });
       user.isVerified = true;
-      memoryUsers.set(idTrim, user);
+      memoryUsers.set(idFinal, user);
       userId  = user.id;
       userObj = sanitizeUser(user);
     }
 
     const token = generateToken(userId);
-    res.status(201).json({ success: true, token, user: userObj });
+    return res.status(201).json({ success: true, token, user: userObj });
   } catch (err) {
     console.error('register error:', err);
-    res.status(500).json({ success: false, message: 'خطأ في الخادم' });
+    return res.status(500).json({ success: false, message: 'خطأ في الخادم' });
   }
 };
 
@@ -542,19 +498,8 @@ const login = async (req, res) => {
       const isMatch = await user.comparePassword(password);
       if (!isMatch) return res.status(401).json({ success: false, message: 'كلمة المرور غير صحيحة' });
 
-      // ─── 🔐 رفض الحسابات غير المفعّلة (إيميل بدون تأكيد OTP) ───
-      // ملاحظة: المستخدمون القدامى بدون حقل isVerified يُعاملون كمفعّلين (isVerified === undefined)
-      if (user.isVerified === false) {
-        const id = user.identifier;
-        const isEmail = isEmailIdentifier(id);
-        return res.status(403).json({
-          success: false,
-          needsVerification: true,
-          identifier: id,
-          maskedEmail: isEmail ? maskEmail(id) : id,
-          message: 'حسابك غير مفعّل، تحقق من بريدك الإلكتروني',
-        });
-      }
+      // ─── v5.4: نظام OTP مُعطَّل مؤقتاً ───
+      // كل المستخدمين يدخلون مباشرة (سواء قدامى أو جدد). فحص isVerified ملغى للإطلاق التجريبي.
 
       // ─── ترقية كلمات المرور القديمة (plain text → bcrypt) ───
       if (!user.password.startsWith('$2a$') && !user.password.startsWith('$2b$')) {
